@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "go1-lewm-mpc"
+version = "0.1.0"
+description = "Phase 1 scaffold for Go1 LEWM terrain-aware foothold cue experiments."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+    "h5py",
+    "pyyaml",
+    "tqdm",
+    "matplotlib",
+    "osqp",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["go1_lewm_mpc*"]
+
+[tool.pytest.ini_options]
+addopts = [
+    "-p",
+    "no:launch_testing",
+    "-p",
+    "no:launch_ros",
+]

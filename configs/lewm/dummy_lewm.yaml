@@ -1,0 +1,9 @@
+# Placeholder DummyLEWM config for later tasks.
+latent_dim: 16
+terrain_feat_dim: 8
+dyn_feat_dim: 8
+base_uncertainty: 0.1
+risk:
+  safe_radius_m: 0.35
+  max_radius_m: 0.55
+  payload_conservative_gain: 0.05

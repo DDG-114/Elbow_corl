@@ -1,0 +1,24 @@
+data:
+  dataset_path: data/go1_rough_payload_v0.hdf5
+  risk_label: rule_or_pairwise
+  sequence_length: 8
+  prediction_horizon: 10
+
+model:
+  latent_dim: 16
+  terrain_feature_dim: 4
+  dyn_feature_dim: 8
+  risk_head:
+    hidden_dims: [32, 32]
+    heuristic_blend: 0.25
+
+training:
+  device: cuda
+  batch_size: 256
+  epochs: 20
+  learning_rate: 0.0003
+  weight_decay: 0.000001
+  seed: 0
+
+checkpoint:
+  out_path: checkpoints/lewm_adapter_v0.ckpt

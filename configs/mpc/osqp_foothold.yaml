@@ -1,0 +1,10 @@
+# Placeholder OSQP foothold selection config for later tasks.
+solver: osqp
+horizon_steps: 1
+dt: 0.02
+weights:
+  risk: 1.0
+  reach: 0.25
+  velocity_bias: 0.1
+limits:
+  max_velocity_bias: [0.25, 0.15, 0.25]

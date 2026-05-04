@@ -1,0 +1,9 @@
+# Placeholder environment config for the Phase 1 Go1 rough-terrain prototype.
+task_name: Isaac-Velocity-Rough-Unitree-Go1-v0
+num_envs: 16
+headless: true
+control_dt: 0.02
+sim_dt: 0.005
+notes:
+  - Isaac Lab integration is intentionally deferred until Task 002.
+  - SI units are expected for all common dataclass packets.
