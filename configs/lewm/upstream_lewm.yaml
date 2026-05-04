@@ -1,0 +1,16 @@
+# Upstream LeWM bridge skeleton config.
+backend: upstream_lewm_mock
+allow_mock: true
+latent_dim: 16
+device: cpu
+input:
+  frame_type: heightmap
+  frame_shape: [1, 64, 64]
+  action_dim: 13
+upstream:
+  repo: null
+  checkpoint_path: null
+  lazy_import: true
+notes:
+  - Real lucas-maes/le-wm loading is intentionally deferred.
+  - Mock mode is deterministic and unit-testable without upstream imports.

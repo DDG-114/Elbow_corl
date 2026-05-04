@@ -10,11 +10,13 @@ import numpy as np
 
 from go1_lewm_mpc.common.constants import N_FEET, N_JOINTS
 from go1_lewm_mpc.common.types import LowLevelCue, MpcPlanPacket, ObsPacket
+from go1_lewm_mpc.mock.fake_isaac_env import FakeIsaacEnv
 
 
 def make_fake_obs_packet(
     t: float = 0.0,
     cmd_vel: np.ndarray | None = None,
+    height_scan: np.ndarray | None = None,
     payload_mass: float = 1.0,
     all_feet_contact: bool = True,
 ) -> ObsPacket:
@@ -47,7 +49,7 @@ def make_fake_obs_packet(
         foot_pos_w=foot_pos_w,
         foot_contact=foot_contact,
         cmd_vel=np.asarray(cmd_vel, dtype=np.float32),
-        height_scan=None,
+        height_scan=height_scan,
         last_action=np.zeros(N_JOINTS, dtype=np.float32),
         payload_mass=float(payload_mass),
         payload_com_b=np.array([0.0, 0.0, 0.05], dtype=np.float32),
@@ -107,6 +109,17 @@ def make_fake_height_scan(n: int = 187, rough: bool = False) -> np.ndarray:
     return np.zeros(n, dtype=np.float32)
 
 
+def make_fake_heightmap(size: tuple[int, int] = (64, 64), rough: bool = False) -> np.ndarray:
+    """Create a fake 2D local heightmap."""
+    height, width = size
+    if rough:
+        y = np.linspace(-1.0, 1.0, height, dtype=np.float32)
+        x = np.linspace(-1.0, 1.0, width, dtype=np.float32)
+        grid_y, grid_x = np.meshgrid(y, x, indexing="ij")
+        return (0.02 * np.sin(3.0 * grid_x) + 0.015 * np.cos(4.0 * grid_y)).astype(np.float32)
+    return np.zeros((height, width), dtype=np.float32)
+
+
 def make_fake_candidates(k: int = 16, center: np.ndarray | None = None) -> np.ndarray:
     """Create candidate footholds around a center point in body frame."""
     if center is None:
@@ -144,34 +157,3 @@ def make_fake_low_level_cue() -> LowLevelCue:
         foothold_hint_b=None,
         risk_summary=None,
     )
-
-
-class FakeIsaacEnv:
-    """Small fake Isaac-like environment for adapter and smoke tests."""
-
-    def __init__(self, episode_len: int = 100):
-        self.episode_len = int(episode_len)
-        self.step_count = 0
-        self.closed = False
-        self.last_action = None
-
-    def reset(self):
-        self.step_count = 0
-        return self.get_raw_obs()
-
-    def step(self, action=None):
-        self.last_action = action
-        self.step_count += 1
-        raw_obs = self.get_raw_obs()
-        reward = 0.0
-        done = self.step_count >= self.episode_len
-        info = {"step_count": self.step_count, "fall": False, "base_height": 0.32}
-        return raw_obs, reward, done, info
-
-    def get_raw_obs(self):
-        obs = make_fake_raw_obs()
-        obs["t"] = self.step_count * 0.02
-        return obs
-
-    def close(self):
-        self.closed = True

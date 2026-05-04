@@ -5,6 +5,8 @@ artifacts/
 outputs/
 .venv/
 .venv_py310_backup_20260429_180210/
+venv/
+venv_py310_backup_20260429_180210/
 le-wm/
 过时/
 过时v2/
@@ -28,6 +30,7 @@ le-wm/
 *.ckpt
 *.onnx
 *.npz
+*.npy
 *.zip
 
 # Isaac Sim / Isaac Lab generated assets and caches.

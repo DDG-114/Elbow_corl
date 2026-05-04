@@ -4,7 +4,7 @@ import importlib.util
 import numpy as np
 import pytest
 
-from go1_lewm_mpc.tests.fixtures import FakeIsaacEnv
+from go1_lewm_mpc.mock.fake_isaac_env import FakeIsaacEnv
 
 
 def _load_run_closed_loop():
@@ -104,3 +104,19 @@ def test_run_closed_loop_uses_unwrapped_gym_env() -> None:
 
     assert metrics.summary()["steps"] == 1
     assert env.unwrapped.last_action is None
+
+
+def test_run_closed_loop_accepts_upstream_lewm_mock_backend() -> None:
+    env = FakeIsaacEnv(episode_len=3)
+
+    metrics = run_closed_loop(
+        env=env,
+        duration_sec=0.1,
+        use_mpc=True,
+        use_cue=True,
+        world_model_backend="upstream_lewm_mock",
+        world_model_cfg={"latent_dim": 8},
+        max_steps=1,
+    )
+
+    assert metrics.summary()["steps"] == 1

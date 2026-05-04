@@ -3,6 +3,8 @@ data:
   risk_label: rule_or_pairwise
   sequence_length: 8
   prediction_horizon: 10
+  frame_shape: [1, 64, 64]
+  action_dim: 13
 
 model:
   latent_dim: 16
@@ -11,6 +13,9 @@ model:
   risk_head:
     hidden_dims: [32, 32]
     heuristic_blend: 0.25
+
+loss:
+  lambda_sigreg: 0.1
 
 training:
   device: cuda

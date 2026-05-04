@@ -2,8 +2,9 @@ import numpy as np
 import pytest
 
 from go1_lewm_mpc.common.types import LatentPacket
-from go1_lewm_mpc.tests.fixtures import make_fake_height_scan, make_fake_obs_packet
+from go1_lewm_mpc.tests.fixtures import make_fake_height_scan, make_fake_heightmap, make_fake_obs_packet
 from go1_lewm_mpc.world_model import DummyLEWM, WorldModelBase
+from go1_lewm_mpc.world_model.input_frame import obs_to_heightmap_frame
 
 
 def test_dummy_lewm_implements_world_model_interface() -> None:
@@ -24,6 +25,54 @@ def test_encode_returns_latent_packet_without_torch() -> None:
     assert latent.dyn_feat.shape == (8,)
     assert np.isfinite(latent.z).all()
     assert latent.uncertainty > 0.0
+
+
+def test_encode_frame_returns_latent_packet_without_torch() -> None:
+    obs = make_fake_obs_packet(height_scan=make_fake_heightmap(rough=True))
+    frame = obs_to_heightmap_frame(obs)
+    model = DummyLEWM()
+
+    latent = model.encode_frame(frame)
+
+    assert isinstance(latent, LatentPacket)
+    assert latent.z.shape == (16,)
+    assert latent.terrain_feat.shape == (4,)
+    assert latent.dyn_feat.shape == (8,)
+    assert np.isfinite(latent.z).all()
+
+
+def test_predict_next_latent_updates_latent_from_action_without_joint_action_contract() -> None:
+    obs = make_fake_obs_packet()
+    model = DummyLEWM()
+    latent = model.encode(obs)
+
+    next_latent = model.predict_next_latent(latent, np.array([0.2, -0.1, 0.05], dtype=np.float32))
+
+    assert isinstance(next_latent, LatentPacket)
+    assert next_latent.z.shape == latent.z.shape
+    assert next_latent.t == pytest.approx(latent.t)
+    assert not np.allclose(next_latent.z[:3], latent.z[:3])
+    assert next_latent.dyn_feat[:3].tolist() == pytest.approx([0.2, -0.1, 0.05])
+
+
+def test_rollout_latent_returns_one_latent_per_high_level_action() -> None:
+    obs = make_fake_obs_packet(t=0.1)
+    model = DummyLEWM()
+    actions = np.array(
+        [
+            [0.2, 0.0, 0.0],
+            [0.1, 0.1, 0.0],
+            [0.0, 0.0, 0.2],
+        ],
+        dtype=np.float32,
+    )
+
+    rollout = model.rollout_latent(obs, actions, dt=0.02)
+
+    assert len(rollout) == 3
+    assert [latent.z.shape for latent in rollout] == [(16,), (16,), (16,)]
+    assert [latent.t for latent in rollout] == pytest.approx([0.12, 0.14, 0.16])
+    assert all(np.isfinite(latent.z).all() for latent in rollout)
 
 
 def test_predict_risk_returns_finite_vector() -> None:
@@ -97,3 +146,11 @@ def test_predict_state_rejects_bad_horizon() -> None:
 
     with pytest.raises(ValueError, match="horizon"):
         model.predict_state(obs, horizon=0, dt=0.02)
+
+
+def test_rollout_latent_rejects_bad_action_sequence() -> None:
+    model = DummyLEWM()
+    obs = make_fake_obs_packet()
+
+    with pytest.raises(ValueError, match="action_sequence"):
+        model.rollout_latent(obs, np.zeros(3, dtype=np.float32), dt=0.02)

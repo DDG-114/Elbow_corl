@@ -4,6 +4,12 @@ num_envs: 16
 headless: true
 control_dt: 0.02
 sim_dt: 0.005
+obs:
+  height_scan_mode: heightmap2d
+  heightmap_size: [64, 64]
+  heightmap_extent_m: [0.8, 0.5]
+  heightmap_source: raycast
 notes:
   - Isaac Lab integration is intentionally deferred until Task 002.
   - SI units are expected for all common dataclass packets.
+  - WorldModelInputFrame uses a channel-first [1,64,64] heightmap frame by default.

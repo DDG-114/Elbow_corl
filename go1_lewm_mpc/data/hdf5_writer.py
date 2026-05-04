@@ -8,7 +8,14 @@ from typing import Any
 import h5py
 import numpy as np
 
-from go1_lewm_mpc.data.dataset_schema import EPISODE_FIELDS, stack_steps, validate_episode
+from go1_lewm_mpc.data.dataset_schema import (
+    EPISODE_FIELDS,
+    WORLD_MODEL_GROUP,
+    WORLD_MODEL_PROBE_GROUP,
+    stack_steps,
+    validate_episode,
+    validate_world_model_episode,
+)
 
 
 class Hdf5EpisodeWriter:
@@ -38,6 +45,9 @@ class Hdf5EpisodeWriter:
             validate_episode(episode)
         else:
             episode = stack_steps(steps_or_episode, success=success, fall=fall)
+        world_model_episode = episode.get(WORLD_MODEL_GROUP) if isinstance(episode, dict) else None
+        if world_model_episode is not None:
+            validate_world_model_episode(world_model_episode)
 
         if episode_name is None:
             episode_name = f"episode_{self._episode_count:06d}"
@@ -51,6 +61,8 @@ class Hdf5EpisodeWriter:
                 group.create_dataset(field, data=np.asarray(bool(value), dtype=np.bool_))
             else:
                 group.create_dataset(field, data=value, compression=_compression_for(value))
+        if world_model_episode is not None:
+            _write_world_model_group(group, world_model_episode)
 
         self._episode_count += 1
         self._file.flush()
@@ -73,3 +85,14 @@ class Hdf5EpisodeWriter:
 def _compression_for(value: Any) -> str | None:
     array = np.asarray(value)
     return "gzip" if array.size > 0 else None
+
+
+def _write_world_model_group(group: h5py.Group, world_model_episode: dict) -> None:
+    wm_group = group.create_group(WORLD_MODEL_GROUP)
+    for field, value in world_model_episode.items():
+        if field == WORLD_MODEL_PROBE_GROUP:
+            probe_group = wm_group.create_group(WORLD_MODEL_PROBE_GROUP)
+            for probe_name, probe_value in value.items():
+                probe_group.create_dataset(probe_name, data=probe_value, compression=_compression_for(probe_value))
+        else:
+            wm_group.create_dataset(field, data=value, compression=_compression_for(value))

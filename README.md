@@ -1,5 +1,7 @@
 # Go1 LEWM MPC
 
+For Codex: read `AGENTS.md` before making changes. This is an existing repository, not a greenfield project.
+
 Phase 1 builds a mock-testable scaffold for a Unitree Go1 foothold-cue system in Isaac Lab. The intended architecture keeps the official Go1 rough-terrain locomotion policy as the low-level controller, while a future LEWM layer predicts local terrain risk and reduced-order state features for foothold selection.
 
 ```text

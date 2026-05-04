@@ -68,6 +68,41 @@ class ObsPacket:
 
 
 @dataclass
+class WorldModelInputFrame:
+    """Visual-like observation frame for a LeWM-style encoder.
+
+    Phase 1 uses local terrain frames such as heightmaps, not raw RGB by
+    default. The frame is always channel-first with shape [C, H, W].
+    """
+
+    t: float
+    frame: np.ndarray  # shape [C, H, W], float32
+    frame_type: str  # "heightmap", "depth", or "rgb"
+    action_context: np.ndarray  # high-level command/action context, shape [D]
+    metadata: dict
+
+    def __post_init__(self) -> None:
+        self.t = _validate_scalar(self.t, "t")
+        self.frame = as_float_array(self.frame, "frame")
+        if self.frame.ndim != 3:
+            raise ValueError(f"frame must have shape [C, H, W], got {self.frame.shape}")
+        if any(dim <= 0 for dim in self.frame.shape):
+            raise ValueError(f"frame dimensions must be positive, got {self.frame.shape}")
+
+        self.frame_type = str(self.frame_type)
+        if self.frame_type not in {"heightmap", "depth", "rgb"}:
+            raise ValueError(f"frame_type must be one of heightmap, depth, rgb; got {self.frame_type!r}")
+
+        self.action_context = as_float_array(self.action_context, "action_context")
+        if self.action_context.ndim != 1:
+            raise ValueError(f"action_context must have shape [D], got {self.action_context.shape}")
+
+        if not isinstance(self.metadata, dict):
+            raise ValueError("metadata must be a dict")
+        self.metadata = dict(self.metadata)
+
+
+@dataclass
 class LatentPacket:
     """World-model latent features for one control step."""
 
@@ -141,6 +176,32 @@ class MpcPlanPacket:
         self.confidence = _validate_scalar(self.confidence, "confidence")
         if not isinstance(self.debug, dict):
             raise ValueError("debug must be a dict")
+
+
+@dataclass
+class MidAction:
+    """High-level action used for LeWM latent predictor conditioning.
+
+    This is not a 12D joint action. It represents command-level and
+    foothold-cue-level decisions while the low-level locomotion policy remains
+    responsible for joint control.
+    """
+
+    t: float
+    cmd_vel: np.ndarray  # shape [3], [vx, vy, yaw_rate]
+    velocity_bias: np.ndarray  # shape [3], [dvx, dvy, dyaw]
+    selected_leg_id: Optional[int]
+    foothold_delta_b: Optional[np.ndarray]  # shape [3], body frame, meters
+
+    def __post_init__(self) -> None:
+        self.t = _validate_scalar(self.t, "t")
+        self.cmd_vel = as_float_array(self.cmd_vel, "cmd_vel", (3,))
+        self.velocity_bias = as_float_array(self.velocity_bias, "velocity_bias", (3,))
+        if self.selected_leg_id is not None:
+            if not 0 <= int(self.selected_leg_id) < N_FEET:
+                raise ValueError(f"selected_leg_id must be in [0, {N_FEET - 1}] or None, got {self.selected_leg_id}")
+            self.selected_leg_id = int(self.selected_leg_id)
+        self.foothold_delta_b = optional_float_array(self.foothold_delta_b, "foothold_delta_b", (3,))
 
 
 @dataclass

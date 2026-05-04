@@ -10,6 +10,7 @@ import sys
 import time
 
 import numpy as np
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -21,7 +22,7 @@ from go1_lewm_mpc.envs.obs_adapter import ObsAdapter
 from go1_lewm_mpc.eval.metrics import ClosedLoopMetrics
 from go1_lewm_mpc.foothold import FootholdCandidateGenerator, PhaseEstimator
 from go1_lewm_mpc.mpc import OSQPFootholdSelector
-from go1_lewm_mpc.world_model import DummyLEWM
+from go1_lewm_mpc.world_model.factory import WORLD_MODEL_BACKENDS, build_world_model
 
 
 class ZeroPolicy:
@@ -36,7 +37,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--task", default=DEFAULT_GO1_TASK, help="Isaac Lab task name.")
     parser.add_argument("--num_envs", type=int, default=16, help="Number of parallel environments.")
     parser.add_argument("--duration_sec", type=float, default=10.0, help="Run duration in seconds.")
-    parser.add_argument("--world_model", default="dummy", choices=("dummy",), help="World model implementation.")
+    parser.add_argument("--world_model", default="dummy", choices=WORLD_MODEL_BACKENDS, help="World model implementation.")
+    parser.add_argument("--world_model_ckpt", default=None, help="Optional world-model checkpoint path.")
+    parser.add_argument("--world_model_cfg", default=None, help="Optional world-model YAML config path.")
+    parser.add_argument("--world_model_device", default="cpu", help="Torch device for local_lewm backend.")
     parser.add_argument("--policy_checkpoint", default=None, help="Exported Isaac Lab/RSL-RL TorchScript policy.pt.")
     parser.add_argument("--policy_device", default="cuda", help="Torch device for --policy_checkpoint.")
     parser.add_argument("--policy_obs_key", default="policy", help="Raw observation dict key consumed by the policy.")
@@ -73,6 +77,10 @@ def main() -> int:
             duration_sec=args.duration_sec,
             use_mpc=args.use_mpc,
             use_cue=args.use_cue,
+            world_model_backend=args.world_model,
+            world_model_cfg=_load_world_model_cfg(args.world_model_cfg),
+            world_model_ckpt=args.world_model_ckpt,
+            world_model_device=args.world_model_device,
             policy_checkpoint=args.policy_checkpoint,
             policy_device=args.policy_device,
             policy_obs_key=args.policy_obs_key,
@@ -104,6 +112,10 @@ def run_closed_loop(
     duration_sec: float,
     use_mpc: bool,
     use_cue: bool,
+    world_model_backend: str = "dummy",
+    world_model_cfg: dict | None = None,
+    world_model_ckpt: str | None = None,
+    world_model_device: str = "cpu",
     policy_checkpoint: str | None = None,
     policy_device: str = "cuda",
     policy_obs_key: str = "policy",
@@ -114,7 +126,12 @@ def run_closed_loop(
     debug_dump: Path | None = None,
 ) -> ClosedLoopMetrics:
     obs_adapter = ObsAdapter()
-    world_model = DummyLEWM()
+    world_model = build_world_model(
+        backend=world_model_backend,
+        cfg=world_model_cfg,
+        checkpoint_path=world_model_ckpt,
+        device=world_model_device,
+    )
     phase = PhaseEstimator()
     generator = FootholdCandidateGenerator()
     selector = OSQPFootholdSelector()
@@ -247,6 +264,19 @@ def _make_policy(
         env_provider=lambda: _adapter_env(env),
         strict_cue=strict_policy_cue,
     )
+
+
+def _load_world_model_cfg(path_text: str | None) -> dict:
+    if path_text is None:
+        return {}
+    path = Path(path_text)
+    if not path.exists():
+        raise FileNotFoundError(path)
+    with path.open("r", encoding="utf-8") as file:
+        loaded = yaml.safe_load(file) or {}
+    if not isinstance(loaded, dict):
+        raise ValueError(f"world model cfg must be a YAML mapping, got {type(loaded).__name__}")
+    return loaded
 
 
 def _adapter_env(env):

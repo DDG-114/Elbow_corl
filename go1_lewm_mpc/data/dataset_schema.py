@@ -49,6 +49,10 @@ TIME_SERIES_SHAPES = {
 
 SCALAR_FIELDS = ("success", "fall")
 
+WORLD_MODEL_GROUP = "world_model"
+WORLD_MODEL_FIELDS = ("frame", "action", "next_frame", "done")
+WORLD_MODEL_PROBE_GROUP = "probe"
+
 
 def obs_packet_to_step(obs: ObsPacket) -> dict[str, np.ndarray | float]:
     """Convert one ObsPacket into a serializable step dictionary."""
@@ -115,6 +119,62 @@ def validate_episode(episode: Mapping[str, Any]) -> None:
         scalar = np.asarray(episode[field])
         if scalar.shape not in ((), (1,)):
             raise ValueError(f"{field} must be scalar, got {scalar.shape}")
+
+
+def validate_world_model_episode(world_model: Mapping[str, Any]) -> None:
+    """Validate optional LeWM-style sequence arrays for one episode.
+
+    Required fields are:
+    - frame: [T, C, H, W]
+    - action: [T, A]
+    - next_frame: [T, C, H, W]
+    - done: [T]
+
+    Optional probe arrays live under ``probe`` and must have first dimension T.
+    """
+    missing = [field for field in WORLD_MODEL_FIELDS if field not in world_model]
+    if missing:
+        raise ValueError(f"world_model episode is missing fields: {missing}")
+
+    frame = np.asarray(world_model["frame"], dtype=np.float32)
+    action = np.asarray(world_model["action"], dtype=np.float32)
+    next_frame = np.asarray(world_model["next_frame"], dtype=np.float32)
+    done = np.asarray(world_model["done"], dtype=np.bool_)
+
+    if frame.ndim != 4:
+        raise ValueError(f"world_model/frame must have shape [T, C, H, W], got {frame.shape}")
+    if action.ndim != 2:
+        raise ValueError(f"world_model/action must have shape [T, A], got {action.shape}")
+    if next_frame.shape != frame.shape:
+        raise ValueError(f"world_model/next_frame must match frame shape {frame.shape}, got {next_frame.shape}")
+    if done.shape != (frame.shape[0],):
+        raise ValueError(f"world_model/done must have shape [{frame.shape[0]}], got {done.shape}")
+    if action.shape[0] != frame.shape[0]:
+        raise ValueError(f"world_model/action first dimension must be T={frame.shape[0]}, got {action.shape[0]}")
+    if frame.shape[0] == 0:
+        raise ValueError("world_model episode must contain at least one timestep")
+    if frame.shape[1] <= 0 or frame.shape[2] <= 0 or frame.shape[3] <= 0:
+        raise ValueError(f"world_model/frame dimensions must be positive, got {frame.shape}")
+    if action.shape[1] <= 0:
+        raise ValueError(f"world_model/action dimension must be positive, got {action.shape}")
+    if not np.all(np.isfinite(frame)):
+        raise ValueError("world_model/frame must contain only finite values")
+    if not np.all(np.isfinite(action)):
+        raise ValueError("world_model/action must contain only finite values")
+    if not np.all(np.isfinite(next_frame)):
+        raise ValueError("world_model/next_frame must contain only finite values")
+
+    probe = world_model.get(WORLD_MODEL_PROBE_GROUP, {})
+    if probe is None:
+        return
+    if not isinstance(probe, Mapping):
+        raise ValueError("world_model/probe must be a mapping")
+    for name, value in probe.items():
+        array = np.asarray(value)
+        if array.shape[:1] != (frame.shape[0],):
+            raise ValueError(f"world_model/probe/{name} first dimension must be T={frame.shape[0]}, got {array.shape}")
+        if array.dtype.kind in {"f", "c"} and not np.all(np.isfinite(array)):
+            raise ValueError(f"world_model/probe/{name} must contain only finite values")
 
 
 def _normalize_step(step: ObsPacket | Mapping[str, Any]) -> Mapping[str, Any]:

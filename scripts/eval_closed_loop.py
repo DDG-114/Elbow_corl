@@ -23,7 +23,7 @@ from go1_lewm_mpc.envs.go1_env_wrapper import DEFAULT_GO1_TASK, Go1EnvWrapper, I
 from go1_lewm_mpc.eval.benchmark_payload import payload_scenarios
 from go1_lewm_mpc.eval.benchmark_terrain import terrain_scenarios
 from go1_lewm_mpc.eval.metrics import REQUIRED_EVAL_METRICS, aggregate_metric_rows
-from go1_lewm_mpc.tests.fixtures import FakeIsaacEnv
+from go1_lewm_mpc.mock.fake_isaac_env import FakeIsaacEnv
 
 
 def parse_args() -> argparse.Namespace:
@@ -88,6 +88,10 @@ def _run_episode(cfg: dict, scenario: dict, mode: str, fake: bool):
             duration_sec=float(cfg.get("duration_sec", 10.0)),
             use_mpc=use_mpc,
             use_cue=use_cue,
+            world_model_backend=str(cfg.get("world_model", "dummy")),
+            world_model_cfg=dict(cfg.get("world_model_cfg", {}) or {}),
+            world_model_ckpt=cfg.get("world_model_ckpt"),
+            world_model_device=str(cfg.get("world_model_device", "cpu")),
             max_steps=max_steps,
             debug_dump=None,
         )

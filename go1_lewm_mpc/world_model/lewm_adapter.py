@@ -8,7 +8,7 @@ import warnings
 
 import numpy as np
 
-from go1_lewm_mpc.common.types import LatentPacket, ObsPacket
+from go1_lewm_mpc.common.types import LatentPacket, ObsPacket, WorldModelInputFrame
 from go1_lewm_mpc.world_model.base import WorldModelBase
 from go1_lewm_mpc.world_model.state_head import constant_velocity_state_prediction
 from go1_lewm_mpc.world_model.terrain_head import terrain_features
@@ -72,7 +72,7 @@ class LEWMAdapter(WorldModelBase):
         self._validate_checkpoint_shapes()
 
     def encode(self, obs: ObsPacket) -> LatentPacket:
-        """Encode one observation into latent terrain and dynamics features."""
+        """Encode one structured observation into latent terrain and dynamics features."""
         terrain_feat, dyn_feat, obs_feat = _observation_features(obs)
         z = self._encode_features(obs_feat)
         uncertainty = _estimate_uncertainty(obs, terrain_feat)
@@ -84,8 +84,69 @@ class LEWMAdapter(WorldModelBase):
             uncertainty=uncertainty,
         )
 
+    def encode_frame(self, frame: WorldModelInputFrame) -> LatentPacket:
+        """Encode a LeWM-style frame with a deterministic local placeholder.
+
+        This is not a true upstream le-wm encoder bridge. Real upstream loading
+        is intentionally deferred to a later task.
+        """
+        frame_feat = _frame_features(frame)
+        z = np.zeros(self.latent_dim, dtype=np.float32)
+        z[: min(z.shape[0], frame_feat.shape[0])] = frame_feat[: z.shape[0]]
+        dyn_feat = np.zeros(8, dtype=np.float32)
+        action = np.asarray(frame.action_context, dtype=np.float32).reshape(-1)
+        dyn_feat[: min(3, action.shape[0])] = action[:3]
+        terrain_feat = frame_feat[:4].astype(np.float32)
+        return LatentPacket(
+            t=frame.t,
+            z=z,
+            terrain_feat=terrain_feat,
+            dyn_feat=dyn_feat,
+            uncertainty=float(0.05 + terrain_feat[1]),
+        )
+
+    def predict_next_latent(self, latent: LatentPacket, action: np.ndarray) -> LatentPacket:
+        """Predict next latent with a deterministic placeholder transition.
+
+        This keeps the semantic interface usable for tests without claiming
+        compatibility with upstream le-wm checkpoints.
+        """
+        action_vec = _validate_action_vector(action)
+        z = np.asarray(latent.z, dtype=np.float32).copy()
+        update_dim = min(z.shape[0], action_vec.shape[0])
+        z[:update_dim] = z[:update_dim] + 0.05 * action_vec[:update_dim]
+        if z.shape[0] > update_dim:
+            z[update_dim:] = 0.98 * z[update_dim:]
+
+        dyn_feat = np.asarray(latent.dyn_feat, dtype=np.float32).copy()
+        dyn_update_dim = min(dyn_feat.shape[0], action_vec.shape[0])
+        dyn_feat[:dyn_update_dim] = action_vec[:dyn_update_dim]
+
+        return LatentPacket(
+            t=float(latent.t),
+            z=z.astype(np.float32),
+            terrain_feat=np.asarray(latent.terrain_feat, dtype=np.float32).copy(),
+            dyn_feat=dyn_feat.astype(np.float32),
+            uncertainty=float(latent.uncertainty + 0.01 * np.linalg.norm(action_vec)),
+        )
+
+    def rollout_latent(self, obs: ObsPacket, action_sequence: np.ndarray, dt: float) -> list[LatentPacket]:
+        """Roll out placeholder latent dynamics over a high-level action sequence."""
+        dt = float(dt)
+        if dt <= 0.0:
+            raise ValueError(f"dt must be positive, got {dt}")
+        actions = _validate_action_sequence(action_sequence)
+
+        current = self.encode(obs)
+        rollout: list[LatentPacket] = []
+        for step_idx, action in enumerate(actions):
+            current = self.predict_next_latent(current, action)
+            current.t = float(obs.t + (step_idx + 1) * dt)
+            rollout.append(current)
+        return rollout
+
     def predict_risk(self, obs: ObsPacket, query_points_b: np.ndarray) -> np.ndarray:
-        """Predict finite per-candidate foothold risk with shape [K]."""
+        """Auxiliary probe: predict finite per-candidate foothold risk with shape [K]."""
         points = np.asarray(query_points_b, dtype=np.float32)
         if points.ndim != 2 or points.shape[1] != 3:
             raise ValueError(f"query_points_b must have shape [K, 3], got {points.shape}")
@@ -109,7 +170,7 @@ class LEWMAdapter(WorldModelBase):
         return risk
 
     def predict_state(self, obs: ObsPacket, horizon: int, dt: float) -> np.ndarray:
-        """Predict reduced-order future state using the current stable state head."""
+        """Auxiliary probe: predict reduced-order future state with the current state head."""
         return constant_velocity_state_prediction(obs, horizon=horizon, dt=dt)
 
     def _resolve_device(self, requested_device: str):
@@ -271,6 +332,54 @@ def _estimated_nominal_z(obs: ObsPacket) -> float:
 
 def _estimate_uncertainty(obs: ObsPacket, terrain_feat: np.ndarray) -> float:
     return float(0.05 + terrain_feat[1] + 0.02 * max(float(obs.payload_mass), 0.0))
+
+
+def _frame_features(frame: WorldModelInputFrame) -> np.ndarray:
+    data = np.asarray(frame.frame, dtype=np.float32)
+    if data.ndim != 3:
+        raise ValueError(f"frame.frame must have shape [C, H, W], got {data.shape}")
+    if not np.all(np.isfinite(data)):
+        raise ValueError("frame.frame must contain only finite values")
+
+    flat = data.reshape(-1)
+    diff_h = np.diff(data, axis=1).reshape(-1) if data.shape[1] > 1 else np.zeros(1, dtype=np.float32)
+    diff_w = np.diff(data, axis=2).reshape(-1) if data.shape[2] > 1 else np.zeros(1, dtype=np.float32)
+    action = np.asarray(frame.action_context, dtype=np.float32).reshape(-1)
+    return np.array(
+        [
+            float(np.mean(flat)),
+            float(np.std(flat)),
+            float(np.mean(np.abs(np.concatenate([diff_h, diff_w])))),
+            float(np.max(np.abs(flat))),
+            float(np.min(flat)),
+            float(np.max(flat)),
+            float(np.mean(action)) if action.size else 0.0,
+            float(np.linalg.norm(action)) if action.size else 0.0,
+        ],
+        dtype=np.float32,
+    )
+
+
+def _validate_action_vector(action: np.ndarray) -> np.ndarray:
+    vector = np.asarray(action, dtype=np.float32)
+    if vector.ndim != 1:
+        raise ValueError(f"action must have shape [Da], got {vector.shape}")
+    if vector.size == 0:
+        raise ValueError("action must not be empty")
+    if not np.all(np.isfinite(vector)):
+        raise ValueError("action must contain only finite values")
+    return vector
+
+
+def _validate_action_sequence(action_sequence: np.ndarray) -> np.ndarray:
+    actions = np.asarray(action_sequence, dtype=np.float32)
+    if actions.ndim != 2:
+        raise ValueError(f"action_sequence must have shape [H, Da], got {actions.shape}")
+    if actions.shape[0] <= 0 or actions.shape[1] <= 0:
+        raise ValueError(f"action_sequence must have non-empty shape [H, Da], got {actions.shape}")
+    if not np.all(np.isfinite(actions)):
+        raise ValueError("action_sequence must contain only finite values")
+    return actions
 
 
 def _checkpoint_get(checkpoint: Any, key: str, default: Any = None) -> Any:

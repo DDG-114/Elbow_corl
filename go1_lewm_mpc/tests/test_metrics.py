@@ -89,3 +89,10 @@ def test_eval_script_fake_mode_writes_outputs(tmp_path: Path) -> None:
     assert "git_commit" in summary
     assert summary["modes"]["baseline"]["slip_proxy"] == "NaN"
     assert "slip_proxy" in summary["modes"]["baseline"]["unavailable_metrics"]
+
+
+def test_eval_script_does_not_import_test_fixtures() -> None:
+    script_path = Path(__file__).resolve().parents[2] / "scripts" / "eval_closed_loop.py"
+    source = script_path.read_text(encoding="utf-8")
+
+    assert "go1_lewm_mpc.tests" not in source
