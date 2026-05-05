@@ -55,6 +55,7 @@ class EvalModePlan:
     world_model_cfg: dict = field(default_factory=dict)
     world_model_ckpt: str | None = None
     world_model_device: str = "cpu"
+    planner_mode: str = "aux_risk"
     uses_aux_risk: bool = False
     uses_latent_cost: bool = False
     notes: str = ""
@@ -137,6 +138,7 @@ def _run_episode(cfg: dict, scenario: dict, plan: EvalModePlan, fake: bool):
             world_model_cfg=plan.world_model_cfg,
             world_model_ckpt=plan.world_model_ckpt,
             world_model_device=plan.world_model_device,
+            planner_mode=plan.planner_mode,
             max_steps=max_steps,
             debug_dump=None,
         )
@@ -167,7 +169,19 @@ def _mode_plan(mode: str, cfg: dict) -> EvalModePlan:
             use_cue=False,
             world_model_backend="dummy",
             world_model_cfg={},
+            planner_mode="aux_risk",
             notes="low-level policy only; MPC and cue disabled",
+        )
+
+    if mode_name == "heuristic_only":
+        return EvalModePlan(
+            mode=mode_name,
+            use_mpc=True,
+            use_cue=True,
+            world_model_backend="dummy",
+            world_model_cfg={},
+            planner_mode="heuristic_only",
+            notes="candidate selector without world-model risk or latent cost",
         )
 
     if mode_name == "dummy_risk":
@@ -178,6 +192,7 @@ def _mode_plan(mode: str, cfg: dict) -> EvalModePlan:
             world_model_backend=str(overrides.get("world_model", "dummy")),
             world_model_cfg=world_model_cfg,
             world_model_device=world_model_device,
+            planner_mode="aux_risk",
             uses_aux_risk=True,
             notes="DummyLEWM auxiliary risk probe drives foothold cue",
         )
@@ -191,8 +206,64 @@ def _mode_plan(mode: str, cfg: dict) -> EvalModePlan:
             world_model_cfg=world_model_cfg,
             world_model_ckpt=world_model_ckpt,
             world_model_device=world_model_device,
+            planner_mode="aux_risk",
             uses_aux_risk=True,
             notes="local LEWM auxiliary risk probe drives foothold cue",
+        )
+
+    if mode_name == "local_lewm_latent_cost" and world_model_ckpt:
+        return EvalModePlan(
+            mode=mode_name,
+            use_mpc=True,
+            use_cue=True,
+            world_model_backend="local_lewm",
+            world_model_cfg=world_model_cfg,
+            world_model_ckpt=world_model_ckpt,
+            world_model_device=world_model_device,
+            planner_mode="latent_cost",
+            uses_latent_cost=True,
+            notes="local LEWM latent rollout cost drives foothold cue",
+        )
+
+    if mode_name == "upstream_lewm_mock_latent_cost":
+        return EvalModePlan(
+            mode=mode_name,
+            use_mpc=True,
+            use_cue=True,
+            world_model_backend="upstream_lewm_mock",
+            world_model_cfg=world_model_cfg,
+            world_model_device=world_model_device,
+            planner_mode="latent_cost",
+            uses_latent_cost=True,
+            notes="mock upstream bridge latent rollout cost drives foothold cue",
+        )
+
+    if mode_name == "lewm_no_payload" and world_model_ckpt:
+        return EvalModePlan(
+            mode=mode_name,
+            use_mpc=True,
+            use_cue=True,
+            world_model_backend="local_lewm",
+            world_model_cfg=world_model_cfg,
+            world_model_ckpt=world_model_ckpt,
+            world_model_device=world_model_device,
+            planner_mode="latent_cost_no_payload",
+            uses_latent_cost=True,
+            notes="local LEWM latent cost with payload removed from world-model input",
+        )
+
+    if mode_name == "lewm_no_heightmap" and world_model_ckpt:
+        return EvalModePlan(
+            mode=mode_name,
+            use_mpc=True,
+            use_cue=True,
+            world_model_backend="local_lewm",
+            world_model_cfg=world_model_cfg,
+            world_model_ckpt=world_model_ckpt,
+            world_model_device=world_model_device,
+            planner_mode="latent_cost_no_heightmap",
+            uses_latent_cost=True,
+            notes="local LEWM latent cost with heightmap removed from world-model input",
         )
 
     raise NotImplementedError(f"mode {mode_name} is declared but not implemented")
@@ -212,6 +283,7 @@ def _write_metrics_csv(path: Path, rows: list[dict]) -> None:
         "world_model_backend",
         "uses_aux_risk",
         "uses_latent_cost",
+        "planner_mode",
         "payload_mass_kg",
         "payload_com_b",
         "mode_notes",
@@ -239,6 +311,7 @@ def _mode_row_fields(plan: EvalModePlan) -> dict:
         "world_model_backend": plan.world_model_backend,
         "uses_aux_risk": plan.uses_aux_risk,
         "uses_latent_cost": plan.uses_latent_cost,
+        "planner_mode": plan.planner_mode,
         "mode_notes": plan.notes,
     }
 

@@ -199,7 +199,7 @@ lewm_no_payload
 lewm_no_heightmap
 ```
 
-The default benchmark config runs only modes that the current closed-loop runner can express without pretending to use unavailable LeWM paths: `baseline` and `dummy_risk`. Modes that still need runner support or a real checkpoint raise `NotImplementedError` instead of silently falling back to baseline. Metrics that cannot be computed, such as the current slip proxy without foot velocity, are recorded as NaN with explanations instead of fabricated values.
+The default benchmark config runs `baseline`, `heuristic_only`, and `dummy_risk`. The runner also supports `upstream_lewm_mock_latent_cost` for mock latent-cost checks. Local LEWM modes require a configured checkpoint, and missing checkpoint modes raise `NotImplementedError` instead of silently falling back to baseline. Metrics that cannot be computed, such as the current slip proxy without foot velocity, are recorded as NaN with explanations instead of fabricated values.
 
 ## Quick Check
 

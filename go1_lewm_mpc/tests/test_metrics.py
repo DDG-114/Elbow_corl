@@ -118,12 +118,13 @@ def test_eval_script_fake_mode_writes_outputs(tmp_path: Path) -> None:
     with (out_dir / "metrics.csv").open("r", encoding="utf-8") as file:
         rows = list(csv.DictReader(file))
     assert rows
-    assert {row["mode"] for row in rows} == {"baseline", "dummy_risk"}
+    assert {row["mode"] for row in rows} == {"baseline", "heuristic_only", "dummy_risk"}
+    assert {row["planner_mode"] for row in rows if row["mode"] == "heuristic_only"} == {"heuristic_only"}
     assert {row["uses_aux_risk"] for row in rows if row["mode"] == "dummy_risk"} == {"True"}
 
     with (out_dir / "ablation_summary.csv").open("r", encoding="utf-8") as file:
         ablation_rows = list(csv.DictReader(file))
-    assert {row["mode"] for row in ablation_rows} == {"baseline", "dummy_risk"}
+    assert {row["mode"] for row in ablation_rows} == {"baseline", "heuristic_only", "dummy_risk"}
     assert "cue_norm_mean" in ablation_rows[0]
 
     summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
@@ -137,22 +138,48 @@ def test_eval_script_declares_pr11_modes_and_rejects_unimplemented_modes() -> No
     module = _load_eval_module()
 
     assert set(module.DECLARED_ABLATION_MODES) == PR11_MODES
-    for mode in PR11_MODES - {"baseline", "dummy_risk", "local_lewm_aux_risk"}:
+    implemented_without_checkpoint = {"baseline", "heuristic_only", "dummy_risk", "upstream_lewm_mock_latent_cost"}
+    for mode in PR11_MODES - implemented_without_checkpoint - {"local_lewm_aux_risk"}:
         with pytest.raises(NotImplementedError, match=f"mode {mode} is declared but not implemented"):
             module._mode_plan(mode, {})
     with pytest.raises(NotImplementedError, match="mode local_lewm_aux_risk is declared but not implemented"):
         module._mode_plan("local_lewm_aux_risk", {})
 
 
-def test_eval_script_can_plan_local_lewm_aux_risk_when_checkpoint_is_configured() -> None:
+def test_eval_script_plans_implemented_modes() -> None:
+    module = _load_eval_module()
+
+    heuristic = module._mode_plan("heuristic_only", {})
+    assert heuristic.planner_mode == "heuristic_only"
+    assert heuristic.uses_aux_risk is False
+    assert heuristic.uses_latent_cost is False
+
+    upstream = module._mode_plan("upstream_lewm_mock_latent_cost", {"world_model_cfg": {"latent_dim": 8}})
+    assert upstream.world_model_backend == "upstream_lewm_mock"
+    assert upstream.planner_mode == "latent_cost"
+    assert upstream.uses_latent_cost is True
+
+
+def test_eval_script_can_plan_local_lewm_modes_when_checkpoint_is_configured() -> None:
     module = _load_eval_module()
 
     plan = module._mode_plan("local_lewm_aux_risk", {"world_model_ckpt": "checkpoint.pt", "world_model_cfg": {"latent_dim": 8}})
 
     assert plan.world_model_backend == "local_lewm"
     assert plan.world_model_ckpt == "checkpoint.pt"
+    assert plan.planner_mode == "aux_risk"
     assert plan.uses_aux_risk is True
     assert plan.uses_latent_cost is False
+
+    latent = module._mode_plan("local_lewm_latent_cost", {"world_model_ckpt": "checkpoint.pt"})
+    assert latent.planner_mode == "latent_cost"
+    assert latent.uses_latent_cost is True
+
+    no_payload = module._mode_plan("lewm_no_payload", {"world_model_ckpt": "checkpoint.pt"})
+    assert no_payload.planner_mode == "latent_cost_no_payload"
+
+    no_heightmap = module._mode_plan("lewm_no_heightmap", {"world_model_ckpt": "checkpoint.pt"})
+    assert no_heightmap.planner_mode == "latent_cost_no_heightmap"
 
 
 def test_eval_script_does_not_import_test_fixtures() -> None:

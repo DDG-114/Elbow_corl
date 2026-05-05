@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -22,7 +23,17 @@ from go1_lewm_mpc.envs.obs_adapter import ObsAdapter
 from go1_lewm_mpc.eval.metrics import ClosedLoopMetrics
 from go1_lewm_mpc.foothold import FootholdCandidateGenerator, PhaseEstimator
 from go1_lewm_mpc.mpc import OSQPFootholdSelector
+from go1_lewm_mpc.mpc.cost_terms import latent_rollout_cost
 from go1_lewm_mpc.world_model.factory import WORLD_MODEL_BACKENDS, build_world_model
+from go1_lewm_mpc.world_model.action_adapter import MID_ACTION_VECTOR_DIM, mid_action_to_vector, plan_to_mid_action
+
+PLANNER_MODES = (
+    "aux_risk",
+    "heuristic_only",
+    "latent_cost",
+    "latent_cost_no_payload",
+    "latent_cost_no_heightmap",
+)
 
 
 class ZeroPolicy:
@@ -41,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--world_model_ckpt", default=None, help="Optional world-model checkpoint path.")
     parser.add_argument("--world_model_cfg", default=None, help="Optional world-model YAML config path.")
     parser.add_argument("--world_model_device", default="cpu", help="Torch device for local_lewm backend.")
+    parser.add_argument("--planner_mode", default="aux_risk", choices=PLANNER_MODES, help="MPC cost source.")
     parser.add_argument("--policy_checkpoint", default=None, help="Exported Isaac Lab/RSL-RL TorchScript policy.pt.")
     parser.add_argument("--policy_device", default="cuda", help="Torch device for --policy_checkpoint.")
     parser.add_argument("--policy_obs_key", default="policy", help="Raw observation dict key consumed by the policy.")
@@ -81,6 +93,7 @@ def main() -> int:
             world_model_cfg=_load_world_model_cfg(args.world_model_cfg),
             world_model_ckpt=args.world_model_ckpt,
             world_model_device=args.world_model_device,
+            planner_mode=args.planner_mode,
             policy_checkpoint=args.policy_checkpoint,
             policy_device=args.policy_device,
             policy_obs_key=args.policy_obs_key,
@@ -116,6 +129,7 @@ def run_closed_loop(
     world_model_cfg: dict | None = None,
     world_model_ckpt: str | None = None,
     world_model_device: str = "cpu",
+    planner_mode: str = "aux_risk",
     policy_checkpoint: str | None = None,
     policy_device: str = "cuda",
     policy_obs_key: str = "policy",
@@ -125,6 +139,7 @@ def run_closed_loop(
     max_steps: int | None = None,
     debug_dump: Path | None = None,
 ) -> ClosedLoopMetrics:
+    planner_mode = _validate_planner_mode(planner_mode)
     obs_adapter = ObsAdapter()
     world_model = build_world_model(
         backend=world_model_backend,
@@ -166,8 +181,9 @@ def run_closed_loop(
         if use_mpc:
             swing_leg = phase.update(obs)
             candidates_b = generator.generate(obs, swing_leg)
-            risk = world_model.predict_risk(obs, candidates_b)
-            plan = selector.select(obs, swing_leg, candidates_b, risk)
+            wm_obs = _world_model_obs_for_mode(obs, planner_mode)
+            risk, latent_cost = _candidate_costs_for_mode(world_model, wm_obs, candidates_b, planner_mode, dt)
+            plan = selector.select(obs, swing_leg, candidates_b, risk, latent_cost=latent_cost)
             if use_cue:
                 cue = make_low_level_cue(obs, plan)
 
@@ -190,6 +206,62 @@ def run_closed_loop(
                 time.sleep(dt - elapsed)
 
     return metrics
+
+
+def _candidate_costs_for_mode(world_model, obs, candidates_b: np.ndarray, planner_mode: str, dt: float):
+    if planner_mode == "heuristic_only":
+        return None, np.zeros(candidates_b.shape[0], dtype=np.float32)
+    if planner_mode == "aux_risk":
+        return world_model.predict_risk(obs, candidates_b), None
+    if planner_mode in ("latent_cost", "latent_cost_no_payload", "latent_cost_no_heightmap"):
+        return None, _latent_cost_for_candidates(world_model, obs, candidates_b, dt)
+    raise ValueError(f"unsupported planner_mode: {planner_mode}")
+
+
+def _latent_cost_for_candidates(world_model, obs, candidates_b: np.ndarray, dt: float) -> np.ndarray:
+    costs = []
+    for candidate in np.asarray(candidates_b, dtype=np.float32):
+        action = _candidate_mid_action_vector(obs, candidate)
+        rollout = world_model.rollout_latent(obs, action[None, :], dt=dt)
+        costs.append(latent_rollout_cost(rollout))
+    return np.asarray(costs, dtype=np.float32)
+
+
+def _candidate_mid_action_vector(obs, candidate_b: np.ndarray) -> np.ndarray:
+    plan = type(
+        "_CandidatePlan",
+        (),
+        {
+            "t": obs.t,
+            "selected_leg_id": _nearest_leg_id(obs, candidate_b),
+            "selected_foothold_b": np.asarray(candidate_b, dtype=np.float32),
+            "velocity_bias": np.zeros(3, dtype=np.float32),
+        },
+    )()
+    vector = mid_action_to_vector(plan_to_mid_action(obs, plan))
+    if vector.shape != (MID_ACTION_VECTOR_DIM,):
+        raise ValueError(f"MidAction vector must have shape ({MID_ACTION_VECTOR_DIM},), got {vector.shape}")
+    return vector
+
+
+def _nearest_leg_id(obs, candidate_b: np.ndarray) -> int:
+    distances = np.linalg.norm(np.asarray(obs.foot_pos_b, dtype=np.float32)[:, 0:2] - candidate_b[None, 0:2], axis=1)
+    return int(np.argmin(distances))
+
+
+def _world_model_obs_for_mode(obs, planner_mode: str):
+    if planner_mode == "latent_cost_no_payload":
+        return replace(obs, payload_mass=0.0, payload_com_b=None)
+    if planner_mode == "latent_cost_no_heightmap":
+        return replace(obs, height_scan=None)
+    return obs
+
+
+def _validate_planner_mode(planner_mode: str) -> str:
+    mode = str(planner_mode)
+    if mode not in PLANNER_MODES:
+        raise ValueError(f"planner_mode must be one of {PLANNER_MODES}, got {planner_mode!r}")
+    return mode
 
 
 def _unpack_step(step_out):

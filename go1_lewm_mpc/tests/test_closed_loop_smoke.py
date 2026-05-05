@@ -1,10 +1,12 @@
 from pathlib import Path
 import importlib.util
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 
 from go1_lewm_mpc.mock.fake_isaac_env import FakeIsaacEnv
+from go1_lewm_mpc.world_model.dummy_lewm import DummyLEWM
 
 
 def _load_run_closed_loop():
@@ -120,3 +122,114 @@ def test_run_closed_loop_accepts_upstream_lewm_mock_backend() -> None:
     )
 
     assert metrics.summary()["steps"] == 1
+
+
+def test_heuristic_only_does_not_call_predict_risk() -> None:
+    env = FakeIsaacEnv(episode_len=3)
+
+    with patch.object(DummyLEWM, "predict_risk", side_effect=AssertionError("predict_risk should not be called")):
+        metrics = run_closed_loop(
+            env=env,
+            duration_sec=0.1,
+            use_mpc=True,
+            use_cue=True,
+            planner_mode="heuristic_only",
+            max_steps=1,
+        )
+
+    assert metrics.summary()["steps"] == 1
+    assert metrics.records[-1]["risk_selected"] is None
+    assert metrics.records[-1]["min_risk"] is None
+
+
+def test_dummy_risk_calls_predict_risk() -> None:
+    env = FakeIsaacEnv(episode_len=3)
+    calls = []
+    original = DummyLEWM.predict_risk
+
+    def wrapped(self, obs, candidates_b):
+        calls.append(candidates_b.shape[0])
+        return original(self, obs, candidates_b)
+
+    with patch.object(DummyLEWM, "predict_risk", wrapped):
+        metrics = run_closed_loop(
+            env=env,
+            duration_sec=0.1,
+            use_mpc=True,
+            use_cue=True,
+            planner_mode="aux_risk",
+            max_steps=1,
+        )
+
+    assert calls
+    assert metrics.records[-1]["min_risk"] is not None
+
+
+def test_latent_cost_calls_rollout_latent_and_records_plan_debug() -> None:
+    env = FakeIsaacEnv(episode_len=3)
+    calls = []
+    original = DummyLEWM.rollout_latent
+
+    def wrapped(self, obs, action_sequence, dt):
+        calls.append((obs.payload_mass, obs.height_scan is None, action_sequence.shape))
+        return original(self, obs, action_sequence, dt)
+
+    with patch.object(DummyLEWM, "rollout_latent", wrapped):
+        metrics = run_closed_loop(
+            env=env,
+            duration_sec=0.1,
+            use_mpc=True,
+            use_cue=True,
+            planner_mode="latent_cost",
+            max_steps=1,
+        )
+
+    assert calls
+    assert all(shape == (1, 13) for _, _, shape in calls)
+    assert metrics.records[-1]["risk_selected"] is None
+
+
+def test_latent_cost_no_payload_removes_payload_from_world_model_obs() -> None:
+    env = FakeIsaacEnv(episode_len=3)
+    payload_values = []
+    original = DummyLEWM.rollout_latent
+
+    def wrapped(self, obs, action_sequence, dt):
+        payload_values.append(obs.payload_mass)
+        return original(self, obs, action_sequence, dt)
+
+    with patch.object(DummyLEWM, "rollout_latent", wrapped):
+        run_closed_loop(
+            env=env,
+            duration_sec=0.1,
+            use_mpc=True,
+            use_cue=True,
+            planner_mode="latent_cost_no_payload",
+            max_steps=1,
+        )
+
+    assert payload_values
+    assert set(payload_values) == {0.0}
+
+
+def test_latent_cost_no_heightmap_removes_height_scan_from_world_model_obs() -> None:
+    env = FakeIsaacEnv(episode_len=3)
+    heightmap_missing = []
+    original = DummyLEWM.rollout_latent
+
+    def wrapped(self, obs, action_sequence, dt):
+        heightmap_missing.append(obs.height_scan is None)
+        return original(self, obs, action_sequence, dt)
+
+    with patch.object(DummyLEWM, "rollout_latent", wrapped):
+        run_closed_loop(
+            env=env,
+            duration_sec=0.1,
+            use_mpc=True,
+            use_cue=True,
+            planner_mode="latent_cost_no_heightmap",
+            max_steps=1,
+        )
+
+    assert heightmap_missing
+    assert all(heightmap_missing)

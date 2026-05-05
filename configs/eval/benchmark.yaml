@@ -6,12 +6,13 @@ headless: true
 world_model: dummy
 modes:
   - baseline
+  - heuristic_only
   - dummy_risk
-# Declared PR-11 modes that require later runner integration or a real checkpoint:
-#   - heuristic_only
+# Additional integration modes:
+#   - upstream_lewm_mock_latent_cost
+# Modes below require a local LEWM checkpoint:
 #   - local_lewm_aux_risk
 #   - local_lewm_latent_cost
-#   - upstream_lewm_mock_latent_cost
 #   - lewm_no_payload
 #   - lewm_no_heightmap
 scenarios:
