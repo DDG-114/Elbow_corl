@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate baseline and cue closed-loop modes and write repeatable metrics."""
+"""Evaluate closed-loop ablation modes and write repeatable metrics."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import csv
 import importlib.util
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 import subprocess
 import sys
@@ -20,10 +21,43 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from go1_lewm_mpc.envs.go1_env_wrapper import DEFAULT_GO1_TASK, Go1EnvWrapper, IsaacLabUnavailableError
+from go1_lewm_mpc.envs.payload_randomization import PayloadRandomizer, payload_spec_from_mapping
 from go1_lewm_mpc.eval.benchmark_payload import payload_scenarios
 from go1_lewm_mpc.eval.benchmark_terrain import terrain_scenarios
-from go1_lewm_mpc.eval.metrics import REQUIRED_EVAL_METRICS, aggregate_metric_rows
+from go1_lewm_mpc.eval.metrics import (
+    ABLATION_SUMMARY_FIELDS,
+    REQUIRED_EVAL_METRICS,
+    ablation_summary_rows,
+    aggregate_metric_rows,
+)
 from go1_lewm_mpc.mock.fake_isaac_env import FakeIsaacEnv
+
+DECLARED_ABLATION_MODES = (
+    "baseline",
+    "heuristic_only",
+    "dummy_risk",
+    "local_lewm_aux_risk",
+    "local_lewm_latent_cost",
+    "upstream_lewm_mock_latent_cost",
+    "lewm_no_payload",
+    "lewm_no_heightmap",
+)
+
+
+@dataclass(frozen=True)
+class EvalModePlan:
+    """Concrete execution plan for one evaluation ablation mode."""
+
+    mode: str
+    use_mpc: bool
+    use_cue: bool
+    world_model_backend: str
+    world_model_cfg: dict = field(default_factory=dict)
+    world_model_ckpt: str | None = None
+    world_model_device: str = "cpu"
+    uses_aux_risk: bool = False
+    uses_latent_cost: bool = False
+    notes: str = ""
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episodes", type=int, default=None, help="Override episode count.")
     parser.add_argument("--duration_sec", type=float, default=None, help="Override episode duration.")
     parser.add_argument("--fake", action="store_true", help="Use FakeIsaacEnv instead of Isaac Lab.")
+    parser.add_argument("--mode", "--ablation", dest="mode", default=None, help="Run one ablation mode from the config.")
     return parser.parse_args()
 
 
@@ -43,6 +78,8 @@ def main() -> int:
         cfg["episodes"] = args.episodes
     if args.duration_sec is not None:
         cfg["duration_sec"] = args.duration_sec
+    if args.mode is not None:
+        cfg["modes"] = [args.mode]
 
     out_dir = Path(args.out_dir) if args.out_dir else _default_out_dir(Path(cfg.get("output_root", "runs")))
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -51,10 +88,13 @@ def main() -> int:
     rows = []
     try:
         for scenario in _selected_scenarios(cfg):
-            for mode in cfg.get("modes", ["baseline", "cue"]):
+            for mode in _selected_modes(cfg):
+                plan = _mode_plan(mode, cfg)
                 for episode_idx in range(int(cfg.get("episodes", 1))):
-                    metrics = _run_episode(cfg, scenario, mode, fake=args.fake)
-                    row = metrics.episode_metrics(mode=mode, scenario=scenario["name"], episode_index=episode_idx)
+                    metrics = _run_episode(cfg, scenario, plan, fake=args.fake)
+                    row = metrics.episode_metrics(mode=plan.mode, scenario=scenario["name"], episode_index=episode_idx)
+                    row.update(_mode_row_fields(plan))
+                    row.update(_scenario_row_fields(scenario))
                     row["scenario_notes"] = scenario.get("notes", "")
                     rows.append(row)
     except IsaacLabUnavailableError as exc:
@@ -62,36 +102,41 @@ def main() -> int:
         return 2
 
     _write_metrics_csv(out_dir / "metrics.csv", rows)
+    _write_ablation_summary_csv(out_dir / "ablation_summary.csv", ablation_summary_rows(rows))
     summary = aggregate_metric_rows(rows)
     summary["git_commit"] = _git_commit()
     summary["config"] = cfg
+    summary["declared_ablation_modes"] = list(DECLARED_ABLATION_MODES)
     (out_dir / "summary.json").write_text(json.dumps(_json_safe(summary), indent=2), encoding="utf-8")
     print(f"wrote evaluation outputs to {out_dir}")
     return 0
 
 
-def _run_episode(cfg: dict, scenario: dict, mode: str, fake: bool):
+def _run_episode(cfg: dict, scenario: dict, plan: EvalModePlan, fake: bool):
     run_closed_loop = _load_run_closed_loop()
-    use_mpc, use_cue = _mode_flags(mode)
     max_steps = max(1, int(float(cfg.get("duration_sec", 10.0)) / 0.02))
+    payload_spec = payload_spec_from_mapping(scenario)
     if fake:
         env = FakeIsaacEnv(episode_len=max_steps + 1)
+        PayloadRandomizer().apply(env, payload_spec)
     else:
         env = Go1EnvWrapper(
             task_name=str(cfg.get("task", DEFAULT_GO1_TASK)),
             num_envs=int(cfg.get("num_envs", 16)),
             headless=bool(cfg.get("headless", True)),
         )
+        if _has_nonzero_payload(payload_spec):
+            env.apply_payload(payload_spec)
     try:
         return run_closed_loop(
             env=env,
             duration_sec=float(cfg.get("duration_sec", 10.0)),
-            use_mpc=use_mpc,
-            use_cue=use_cue,
-            world_model_backend=str(cfg.get("world_model", "dummy")),
-            world_model_cfg=dict(cfg.get("world_model_cfg", {}) or {}),
-            world_model_ckpt=cfg.get("world_model_ckpt"),
-            world_model_device=str(cfg.get("world_model_device", "cpu")),
+            use_mpc=plan.use_mpc,
+            use_cue=plan.use_cue,
+            world_model_backend=plan.world_model_backend,
+            world_model_cfg=plan.world_model_cfg,
+            world_model_ckpt=plan.world_model_ckpt,
+            world_model_device=plan.world_model_device,
             max_steps=max_steps,
             debug_dump=None,
         )
@@ -100,14 +145,57 @@ def _run_episode(cfg: dict, scenario: dict, mode: str, fake: bool):
             env.close()
 
 
-def _mode_flags(mode: str) -> tuple[bool, bool]:
-    if mode == "baseline":
-        return False, False
-    if mode == "no-cue":
-        return True, False
-    if mode in ("cue", "dummy_lewm"):
-        return True, True
-    raise ValueError(f"unsupported mode: {mode}")
+def _selected_modes(cfg: dict) -> list[str]:
+    modes = cfg.get("modes") or ["baseline", "dummy_risk"]
+    return [str(mode) for mode in modes]
+
+
+def _mode_plan(mode: str, cfg: dict) -> EvalModePlan:
+    mode_name = str(mode)
+    if mode_name not in DECLARED_ABLATION_MODES:
+        raise ValueError(f"unsupported mode: {mode_name}. Declared modes: {', '.join(DECLARED_ABLATION_MODES)}")
+
+    overrides = dict((cfg.get("mode_overrides", {}) or {}).get(mode_name, {}) or {})
+    world_model_cfg = _merged_world_model_cfg(cfg, overrides)
+    world_model_device = str(overrides.get("world_model_device", cfg.get("world_model_device", "cpu")))
+    world_model_ckpt = _mode_world_model_ckpt(cfg, overrides)
+
+    if mode_name == "baseline":
+        return EvalModePlan(
+            mode=mode_name,
+            use_mpc=False,
+            use_cue=False,
+            world_model_backend="dummy",
+            world_model_cfg={},
+            notes="low-level policy only; MPC and cue disabled",
+        )
+
+    if mode_name == "dummy_risk":
+        return EvalModePlan(
+            mode=mode_name,
+            use_mpc=True,
+            use_cue=True,
+            world_model_backend=str(overrides.get("world_model", "dummy")),
+            world_model_cfg=world_model_cfg,
+            world_model_device=world_model_device,
+            uses_aux_risk=True,
+            notes="DummyLEWM auxiliary risk probe drives foothold cue",
+        )
+
+    if mode_name == "local_lewm_aux_risk" and world_model_ckpt:
+        return EvalModePlan(
+            mode=mode_name,
+            use_mpc=True,
+            use_cue=True,
+            world_model_backend="local_lewm",
+            world_model_cfg=world_model_cfg,
+            world_model_ckpt=world_model_ckpt,
+            world_model_device=world_model_device,
+            uses_aux_risk=True,
+            notes="local LEWM auxiliary risk probe drives foothold cue",
+        )
+
+    raise NotImplementedError(f"mode {mode_name} is declared but not implemented")
 
 
 def _selected_scenarios(cfg: dict) -> list[dict]:
@@ -117,12 +205,72 @@ def _selected_scenarios(cfg: dict) -> list[dict]:
 
 
 def _write_metrics_csv(path: Path, rows: list[dict]) -> None:
-    base_fields = ["mode", "scenario", "episode", *REQUIRED_EVAL_METRICS, "explanations", "scenario_notes"]
+    base_fields = [
+        "mode",
+        "scenario",
+        "episode",
+        "world_model_backend",
+        "uses_aux_risk",
+        "uses_latent_cost",
+        "payload_mass_kg",
+        "payload_com_b",
+        "mode_notes",
+        *REQUIRED_EVAL_METRICS,
+        "explanations",
+        "scenario_notes",
+    ]
     with path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.DictWriter(file, fieldnames=base_fields)
         writer.writeheader()
         for row in rows:
             writer.writerow({field: row.get(field, "") for field in base_fields})
+
+
+def _write_ablation_summary_csv(path: Path, rows: list[dict]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=ABLATION_SUMMARY_FIELDS)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in ABLATION_SUMMARY_FIELDS})
+
+
+def _mode_row_fields(plan: EvalModePlan) -> dict:
+    return {
+        "world_model_backend": plan.world_model_backend,
+        "uses_aux_risk": plan.uses_aux_risk,
+        "uses_latent_cost": plan.uses_latent_cost,
+        "mode_notes": plan.notes,
+    }
+
+
+def _scenario_row_fields(scenario: dict) -> dict:
+    payload_spec = payload_spec_from_mapping(scenario)
+    return {
+        "payload_mass_kg": payload_spec.mass_kg,
+        "payload_com_b": payload_spec.com_b.tolist(),
+    }
+
+
+def _has_nonzero_payload(payload_spec) -> bool:
+    return bool(payload_spec.mass_kg > 0.0 or np.linalg.norm(payload_spec.com_b) > 0.0)
+
+
+def _merged_world_model_cfg(cfg: dict, overrides: dict) -> dict:
+    world_model_cfg = dict(cfg.get("world_model_cfg", {}) or {})
+    world_model_cfg.update(dict(overrides.get("world_model_cfg", {}) or {}))
+    return world_model_cfg
+
+
+def _mode_world_model_ckpt(cfg: dict, overrides: dict) -> str | None:
+    if "world_model_ckpt" in overrides:
+        value = overrides.get("world_model_ckpt")
+    elif "world_model_checkpoint" in overrides:
+        value = overrides.get("world_model_checkpoint")
+    else:
+        value = cfg.get("world_model_ckpt", cfg.get("world_model_checkpoint"))
+    if value is None or str(value).strip() == "":
+        return None
+    return str(value)
 
 
 def _load_run_closed_loop():

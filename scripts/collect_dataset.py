@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
 from go1_lewm_mpc.data.hdf5_writer import Hdf5EpisodeWriter
 from go1_lewm_mpc.envs.go1_env_wrapper import DEFAULT_GO1_TASK, Go1EnvWrapper, IsaacLabUnavailableError
 from go1_lewm_mpc.envs.obs_adapter import ObsAdapter
+from go1_lewm_mpc.envs.payload_randomization import PayloadSpec
 
 
 def parse_args() -> argparse.Namespace:
@@ -27,6 +28,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_steps_per_file", type=int, default=None, help="Roll over to a new HDF5 file after this many collected steps.")
     parser.add_argument("--save_pixels", action="store_true", help="Reserved for future RGB/depth capture.")
     parser.add_argument("--fall_height_threshold", type=float, default=0.18, help="Fallback fall threshold in meters.")
+    parser.add_argument("--payload_mass_kg", type=float, default=0.0, help="Payload mass to apply before collection.")
+    parser.add_argument(
+        "--payload_com_b",
+        default="0.0,0.0,0.0",
+        help="Comma-separated body-frame payload COM offset in meters.",
+    )
     return parser.parse_args()
 
 
@@ -40,6 +47,7 @@ def main() -> int:
     env = Go1EnvWrapper(task_name=args.task, num_envs=args.num_envs, headless=args.headless)
     adapter = ObsAdapter()
     out_path = Path(args.out)
+    payload_spec = PayloadSpec(mass_kg=args.payload_mass_kg, com_b=_parse_vec3(args.payload_com_b, "--payload_com_b"))
 
     writer = None
     file_index = 0
@@ -47,7 +55,10 @@ def main() -> int:
 
     try:
         writer = Hdf5EpisodeWriter(_output_path(out_path, file_index), mode="a")
+        _annotate_payload_metadata(writer, payload_spec)
         for episode_idx in range(args.episodes):
+            if _has_nonzero_payload(payload_spec):
+                env.apply_payload(payload_spec)
             raw_obs = _first_obs(env.reset())
             steps = []
             fall = False
@@ -73,6 +84,7 @@ def main() -> int:
                 file_index += 1
                 current_file_steps = 0
                 writer = Hdf5EpisodeWriter(_output_path(out_path, file_index), mode="a")
+                _annotate_payload_metadata(writer, payload_spec)
 
             success = bool(not fall and len(steps) >= args.episode_len)
             writer.write_episode(steps, success=success, fall=fall)
@@ -139,6 +151,28 @@ def _is_fall(raw_obs, base_height: float, threshold: float) -> bool:
         if "base_height" in raw_obs:
             base_height = float(raw_obs["base_height"])
     return bool(base_height < threshold)
+
+
+def _parse_vec3(value: str, name: str):
+    parts = [part.strip() for part in str(value).split(",")]
+    if len(parts) != 3:
+        raise ValueError(f"{name} must contain exactly three comma-separated values")
+    try:
+        return [float(part) for part in parts]
+    except ValueError as exc:
+        raise ValueError(f"{name} must contain numeric values") from exc
+
+
+def _has_nonzero_payload(payload_spec: PayloadSpec) -> bool:
+    return bool(payload_spec.mass_kg > 0.0 or any(abs(float(value)) > 0.0 for value in payload_spec.com_b))
+
+
+def _annotate_payload_metadata(writer: Hdf5EpisodeWriter, payload_spec: PayloadSpec) -> None:
+    h5_file = getattr(writer, "_file", None)
+    if h5_file is None:
+        return
+    h5_file.attrs["payload_mass_kg"] = float(payload_spec.mass_kg)
+    h5_file.attrs["payload_com_b"] = payload_spec.com_b.astype("float32")
 
 
 if __name__ == "__main__":

@@ -1,13 +1,33 @@
 import csv
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 
 import numpy as np
 import pytest
 
-from go1_lewm_mpc.eval.metrics import REQUIRED_EVAL_METRICS, ClosedLoopMetrics, aggregate_metric_rows
+from go1_lewm_mpc.eval.metrics import (
+    ABLATION_SUMMARY_FIELDS,
+    REQUIRED_EVAL_METRICS,
+    ClosedLoopMetrics,
+    ablation_summary_rows,
+    aggregate_metric_rows,
+)
 from go1_lewm_mpc.tests.fixtures import make_fake_low_level_cue, make_fake_mpc_plan, make_fake_obs_packet
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PR11_MODES = {
+    "baseline",
+    "heuristic_only",
+    "dummy_risk",
+    "local_lewm_aux_risk",
+    "local_lewm_latent_cost",
+    "upstream_lewm_mock_latent_cost",
+    "lewm_no_payload",
+    "lewm_no_heightmap",
+}
 
 
 def test_episode_metrics_contains_required_metrics_and_nan_explanations() -> None:
@@ -49,15 +69,29 @@ def test_episode_metrics_computes_mpc_and_cue_values() -> None:
 def test_aggregate_metric_rows_separates_modes() -> None:
     rows = [
         {"mode": "baseline", **{metric: 0.0 for metric in REQUIRED_EVAL_METRICS}},
-        {"mode": "cue", **{metric: 1.0 for metric in REQUIRED_EVAL_METRICS}},
+        {"mode": "dummy_risk", **{metric: 1.0 for metric in REQUIRED_EVAL_METRICS}},
     ]
 
     summary = aggregate_metric_rows(rows)
 
     assert summary["episodes"] == 2
     assert summary["modes"]["baseline"]["success_rate"] == pytest.approx(0.0)
-    assert summary["modes"]["cue"]["success_rate"] == pytest.approx(1.0)
+    assert summary["modes"]["dummy_risk"]["success_rate"] == pytest.approx(1.0)
     assert "unavailable_metrics" in summary["modes"]["baseline"]
+
+
+def test_ablation_summary_rows_flatten_per_mode_metrics() -> None:
+    rows = [
+        {"mode": "baseline", "scenario": "flat_0kg", **{metric: 0.0 for metric in REQUIRED_EVAL_METRICS}},
+        {"mode": "dummy_risk", "scenario": "rough_0kg", **{metric: 1.0 for metric in REQUIRED_EVAL_METRICS}},
+    ]
+
+    summary_rows = ablation_summary_rows(rows)
+
+    assert set(summary_rows[0]) == set(ABLATION_SUMMARY_FIELDS)
+    assert {row["mode"] for row in summary_rows} == {"baseline", "dummy_risk"}
+    assert {row["episodes"] for row in summary_rows} == {1}
+    assert {row["scenarios"] for row in summary_rows} == {1}
 
 
 def test_eval_script_fake_mode_writes_outputs(tmp_path: Path) -> None:
@@ -73,26 +107,66 @@ def test_eval_script_fake_mode_writes_outputs(tmp_path: Path) -> None:
         "--out_dir",
         str(out_dir),
     ]
-    result = subprocess.run(cmd, cwd=Path(__file__).resolve().parents[2], text=True, capture_output=True)
+    result = subprocess.run(cmd, cwd=REPO_ROOT, text=True, capture_output=True)
 
     assert result.returncode == 0, result.stderr
     assert (out_dir / "metrics.csv").exists()
     assert (out_dir / "summary.json").exists()
+    assert (out_dir / "ablation_summary.csv").exists()
     assert (out_dir / "config.yaml").exists()
 
     with (out_dir / "metrics.csv").open("r", encoding="utf-8") as file:
         rows = list(csv.DictReader(file))
     assert rows
-    assert {row["mode"] for row in rows} == {"baseline", "cue"}
+    assert {row["mode"] for row in rows} == {"baseline", "dummy_risk"}
+    assert {row["uses_aux_risk"] for row in rows if row["mode"] == "dummy_risk"} == {"True"}
+
+    with (out_dir / "ablation_summary.csv").open("r", encoding="utf-8") as file:
+        ablation_rows = list(csv.DictReader(file))
+    assert {row["mode"] for row in ablation_rows} == {"baseline", "dummy_risk"}
+    assert "cue_norm_mean" in ablation_rows[0]
 
     summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
     assert "git_commit" in summary
+    assert set(summary["declared_ablation_modes"]) == PR11_MODES
     assert summary["modes"]["baseline"]["slip_proxy"] == "NaN"
     assert "slip_proxy" in summary["modes"]["baseline"]["unavailable_metrics"]
 
 
+def test_eval_script_declares_pr11_modes_and_rejects_unimplemented_modes() -> None:
+    module = _load_eval_module()
+
+    assert set(module.DECLARED_ABLATION_MODES) == PR11_MODES
+    for mode in PR11_MODES - {"baseline", "dummy_risk", "local_lewm_aux_risk"}:
+        with pytest.raises(NotImplementedError, match=f"mode {mode} is declared but not implemented"):
+            module._mode_plan(mode, {})
+    with pytest.raises(NotImplementedError, match="mode local_lewm_aux_risk is declared but not implemented"):
+        module._mode_plan("local_lewm_aux_risk", {})
+
+
+def test_eval_script_can_plan_local_lewm_aux_risk_when_checkpoint_is_configured() -> None:
+    module = _load_eval_module()
+
+    plan = module._mode_plan("local_lewm_aux_risk", {"world_model_ckpt": "checkpoint.pt", "world_model_cfg": {"latent_dim": 8}})
+
+    assert plan.world_model_backend == "local_lewm"
+    assert plan.world_model_ckpt == "checkpoint.pt"
+    assert plan.uses_aux_risk is True
+    assert plan.uses_latent_cost is False
+
+
 def test_eval_script_does_not_import_test_fixtures() -> None:
-    script_path = Path(__file__).resolve().parents[2] / "scripts" / "eval_closed_loop.py"
+    script_path = REPO_ROOT / "scripts" / "eval_closed_loop.py"
     source = script_path.read_text(encoding="utf-8")
 
     assert "go1_lewm_mpc.tests" not in source
+
+
+def _load_eval_module():
+    path = REPO_ROOT / "scripts" / "eval_closed_loop.py"
+    spec = importlib.util.spec_from_file_location("go1_eval_closed_loop_for_tests", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module

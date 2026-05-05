@@ -7,6 +7,8 @@ import importlib
 from types import ModuleType
 from typing import Any, Callable
 
+from go1_lewm_mpc.envs.payload_randomization import PayloadRandomizer, PayloadSpec
+
 
 DEFAULT_GO1_TASK = "Isaac-Velocity-Rough-Unitree-Go1-v0"
 DEFAULT_TRACKED_VIEWER_EYE = (3.0, -3.0, 2.0)
@@ -109,6 +111,10 @@ class Go1EnvWrapper:
     def get_raw_obs(self) -> Any:
         """Return the most recent raw observation from reset or step."""
         return self._raw_obs
+
+    def apply_payload(self, spec: PayloadSpec, env_ids=None) -> None:
+        """Apply payload through an explicit environment hook."""
+        PayloadRandomizer().apply(self._ensure_env(), spec, env_ids=env_ids)
 
     def close(self) -> None:
         """Close the environment and simulator app if they were started."""

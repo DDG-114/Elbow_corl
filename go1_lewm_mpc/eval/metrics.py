@@ -26,6 +26,14 @@ REQUIRED_EVAL_METRICS = (
     "cue_norm_mean",
 )
 
+ABLATION_SUMMARY_FIELDS = (
+    "mode",
+    "episodes",
+    "scenarios",
+    *REQUIRED_EVAL_METRICS,
+    "unavailable_metrics",
+)
+
 
 @dataclass
 class ClosedLoopMetrics:
@@ -126,6 +134,25 @@ def aggregate_metric_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
         mode_summary["unavailable_metrics"] = unavailable
         summary["modes"][mode] = mode_summary
     return summary
+
+
+def ablation_summary_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flatten per-mode aggregate metrics for ``ablation_summary.csv``."""
+    summary = aggregate_metric_rows(rows)
+    output_rows: list[dict[str, Any]] = []
+    for mode in sorted(summary["modes"]):
+        mode_rows = [row for row in rows if row["mode"] == mode]
+        mode_summary = summary["modes"][mode]
+        output = {
+            "mode": mode,
+            "episodes": len(mode_rows),
+            "scenarios": len({row["scenario"] for row in mode_rows}),
+        }
+        for metric in REQUIRED_EVAL_METRICS:
+            output[metric] = mode_summary[metric]
+        output["unavailable_metrics"] = _format_unavailable_metrics(mode_summary.get("unavailable_metrics", {}))
+        output_rows.append(output)
+    return output_rows
 
 
 def _assert_record_finite(record: dict[str, Any]) -> None:
@@ -237,3 +264,7 @@ def _metric_reason_from_rows(rows: list[dict[str, Any]], metric: str) -> str:
             if chunk.startswith(f"{metric}:"):
                 return chunk.split(":", 1)[1].strip()
     return "not available"
+
+
+def _format_unavailable_metrics(unavailable: dict[str, str]) -> str:
+    return "; ".join(f"{metric}: {reason}" for metric, reason in sorted(unavailable.items()))

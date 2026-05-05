@@ -186,7 +186,20 @@ For mock-only validation without Isaac Lab:
 python scripts/eval_closed_loop.py --fake --episodes 1 --duration_sec 0.04
 ```
 
-Each run writes `config.yaml`, `metrics.csv`, and `summary.json`. Baseline and cue modes are separated in the outputs. Metrics that cannot be computed, such as the current slip proxy without foot velocity, are recorded as NaN with explanations instead of fabricated values.
+Each run writes `config.yaml`, `metrics.csv`, `summary.json`, and `ablation_summary.csv`. PR-11 declares the ablation vocabulary used by the project:
+
+```text
+baseline
+heuristic_only
+dummy_risk
+local_lewm_aux_risk
+local_lewm_latent_cost
+upstream_lewm_mock_latent_cost
+lewm_no_payload
+lewm_no_heightmap
+```
+
+The default benchmark config runs only modes that the current closed-loop runner can express without pretending to use unavailable LeWM paths: `baseline` and `dummy_risk`. Modes that still need runner support or a real checkpoint raise `NotImplementedError` instead of silently falling back to baseline. Metrics that cannot be computed, such as the current slip proxy without foot velocity, are recorded as NaN with explanations instead of fabricated values.
 
 ## Quick Check
 

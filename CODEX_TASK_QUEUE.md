@@ -334,7 +334,7 @@ python scripts/train_lewm.py --config configs/lewm/train_lewm.yaml --dry_run
 
 ## PR-09 — Latent CEM Planner Prototype
 
-Status: TODO
+Status: DONE
 
 Goal:
 Add latent rollout + CEM action sequence search.
@@ -356,7 +356,7 @@ python -m pytest go1_lewm_mpc/tests/test_latent_planner.py -q
 
 ## PR-10 — MPC Cost Uses Latent Rollout
 
-Status: TODO
+Status: DONE
 
 Goal:
 Allow OSQP/selector cost to consume latent rollout cost, not just auxiliary risk.
@@ -382,7 +382,7 @@ python -m pytest go1_lewm_mpc/tests/test_closed_loop_smoke.py -q
 
 ## PR-11 — Evaluation and Ablation Alignment
 
-Status: TODO
+Status: DONE
 
 Goal:
 Add ablations that distinguish auxiliary risk vs latent rollout cost.
@@ -411,7 +411,7 @@ python scripts/eval_closed_loop.py --fake --episodes 1 --duration_sec 0.04
 
 ## PR-12 — Payload Randomization Bridge
 
-Status: TODO
+Status: DONE
 
 Goal:
 Make payload mass/com propagate through fake env, ObsPacket, dataset and evaluation.

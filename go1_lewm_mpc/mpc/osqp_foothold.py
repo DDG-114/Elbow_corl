@@ -23,6 +23,7 @@ class OSQPFootholdSelector:
     def __post_init__(self) -> None:
         weights = self.cfg.get("weights", {})
         self.w_risk = float(weights.get("risk", 1.0))
+        self.w_latent = float(weights.get("latent", 1.0))
         self.w_reach = float(weights.get("reach", 1.0))
         self.w_payload = float(weights.get("payload", 0.0))
         self.osqp_available = bool(self.cfg.get("use_osqp", True))
@@ -32,17 +33,21 @@ class OSQPFootholdSelector:
         obs: ObsPacket,
         swing_leg_id: int,
         candidates_b: np.ndarray,
-        risk: np.ndarray,
+        risk: np.ndarray | None = None,
+        latent_cost: np.ndarray | None = None,
     ) -> MpcPlanPacket:
         leg_id = _validate_leg_id(swing_leg_id)
         candidates = _validate_candidates(candidates_b)
-        risk_arr = _validate_risk(risk, candidates.shape[0])
+        risk_arr = None if risk is None else _validate_risk(risk, candidates.shape[0])
+        latent_arr = None if latent_cost is None else _validate_latent_cost(latent_cost, candidates.shape[0])
         nominal = nominal_foothold_b(leg_id)
         total_score = total_candidate_score(
             candidates,
             risk_arr,
             nominal,
+            latent_cost=latent_arr,
             w_risk=self.w_risk,
+            w_latent=self.w_latent,
             w_reach=self.w_reach,
             w_payload=self.w_payload,
             payload_mass=obs.payload_mass,
@@ -51,7 +56,8 @@ class OSQPFootholdSelector:
         start = time.perf_counter()
         debug: dict[str, Any] = {
             "total_score": total_score.copy(),
-            "risk": risk_arr.copy(),
+            "risk": None if risk_arr is None else risk_arr.copy(),
+            "latent_cost": None if latent_arr is None else latent_arr.copy(),
         }
 
         try:
@@ -141,3 +147,12 @@ def _validate_risk(risk: np.ndarray, count: int) -> np.ndarray:
     if not np.all(np.isfinite(risk_arr)):
         raise ValueError("risk must be finite")
     return risk_arr
+
+
+def _validate_latent_cost(latent_cost: np.ndarray, count: int) -> np.ndarray:
+    cost_arr = np.asarray(latent_cost, dtype=np.float32)
+    if cost_arr.shape != (count,):
+        raise ValueError(f"latent_cost must have shape ({count},), got {cost_arr.shape}")
+    if not np.all(np.isfinite(cost_arr)):
+        raise ValueError("latent_cost must be finite")
+    return cost_arr

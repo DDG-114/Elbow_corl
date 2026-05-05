@@ -1,9 +1,10 @@
 import numpy as np
 import pytest
 
-from go1_lewm_mpc.common.types import MpcPlanPacket
+from go1_lewm_mpc.common.types import LatentPacket, MpcPlanPacket
 from go1_lewm_mpc.foothold import FootholdCandidateGenerator
 from go1_lewm_mpc.mpc import OSQPFootholdSelector
+from go1_lewm_mpc.mpc.cost_terms import latent_rollout_cost
 from go1_lewm_mpc.tests.fixtures import make_fake_obs_packet
 
 
@@ -94,3 +95,75 @@ def test_invalid_inputs_raise_value_error() -> None:
         selector.select(obs, 4, candidates, np.zeros(candidates.shape[0], dtype=np.float32))
     with pytest.raises(ValueError, match="risk"):
         selector.select(obs, 0, candidates, np.zeros(candidates.shape[0] - 1, dtype=np.float32))
+
+
+def test_selector_can_use_latent_cost_without_risk() -> None:
+    obs = make_fake_obs_packet()
+    candidates = np.array(
+        [
+            [0.20, 0.12, -0.30],
+            [0.22, 0.12, -0.30],
+            [0.24, 0.12, -0.30],
+        ],
+        dtype=np.float32,
+    )
+    latent_cost = np.array([10.0, 0.0, 5.0], dtype=np.float32)
+
+    plan = OSQPFootholdSelector({"weights": {"risk": 0.0, "latent": 1.0, "reach": 0.0}}).select(
+        obs,
+        0,
+        candidates,
+        risk=None,
+        latent_cost=latent_cost,
+    )
+
+    assert plan.debug["selected_index"] == 1
+    assert plan.debug["risk"] is None
+    assert np.allclose(plan.debug["latent_cost"], latent_cost)
+
+
+def test_selector_combines_risk_and_latent_cost() -> None:
+    obs = make_fake_obs_packet()
+    candidates = np.array(
+        [
+            [0.20, 0.12, -0.30],
+            [0.22, 0.12, -0.30],
+        ],
+        dtype=np.float32,
+    )
+    risk = np.array([0.0, 10.0], dtype=np.float32)
+    latent_cost = np.array([10.0, 0.0], dtype=np.float32)
+
+    risk_dominant = OSQPFootholdSelector({"weights": {"risk": 1.0, "latent": 0.0, "reach": 0.0}}).select(
+        obs,
+        0,
+        candidates,
+        risk=risk,
+        latent_cost=latent_cost,
+    )
+    latent_dominant = OSQPFootholdSelector({"weights": {"risk": 0.0, "latent": 1.0, "reach": 0.0}}).select(
+        obs,
+        0,
+        candidates,
+        risk=risk,
+        latent_cost=latent_cost,
+    )
+
+    assert risk_dominant.debug["selected_index"] == 0
+    assert latent_dominant.debug["selected_index"] == 1
+
+
+def test_latent_rollout_cost_uses_uncertainty_and_smoothness() -> None:
+    sequence = [
+        LatentPacket(t=0.0, z=np.array([0.0, 0.0], dtype=np.float32), terrain_feat=np.zeros(1), dyn_feat=np.zeros(1), uncertainty=0.1),
+        LatentPacket(t=0.02, z=np.array([1.0, 0.0], dtype=np.float32), terrain_feat=np.zeros(1), dyn_feat=np.zeros(1), uncertainty=0.3),
+    ]
+
+    cost = latent_rollout_cost(sequence, uncertainty_weight=2.0, smoothness_weight=0.5)
+
+    assert cost == pytest.approx(2.0 * 0.2 + 0.5 * 0.5)
+
+
+def test_latent_rollout_cost_rejects_bad_sequence() -> None:
+    with pytest.raises(ValueError, match="latent_sequence"):
+        latent_rollout_cost([])

@@ -73,10 +73,14 @@ class ObsAdapter:
 
         height_scan = self._get_optional(source, env, env_id, "height_scan", _obs_term("height_scan"))
         last_action = self._get_optional(source, env, env_id, "last_action", _obs_term("last_action"))
-        payload_mass = self._get_optional(source, env, env_id, "payload_mass", None)
+        payload_mass = _payload_metadata_attr("payload_mass")(env, env_id)
+        if payload_mass is None and "payload_mass" in source:
+            payload_mass = source["payload_mass"]
         if payload_mass is None:
             payload_mass = 0.0
-        payload_com_b = self._get_optional(source, env, env_id, "payload_com_b", None)
+        payload_com_b = _payload_metadata_attr("payload_com_b")(env, env_id)
+        if payload_com_b is None and "payload_com_b" in source:
+            payload_com_b = source["payload_com_b"]
         t = self._get_optional(source, env, env_id, "t", _env_time())
         if t is None:
             t = 0.0
@@ -160,6 +164,20 @@ def _obs_term(term_name: str):
     return getter
 
 
+def _payload_metadata_attr(attr_name: str):
+    def getter(env: Any, env_id: int):
+        target = _unwrap_env(env)
+        for container_name in ("payload_metadata", "metadata"):
+            container = getattr(target, container_name, None)
+            if isinstance(container, Mapping) and attr_name in container:
+                return container[attr_name]
+        if hasattr(target, attr_name):
+            return getattr(target, attr_name)
+        return None
+
+    return getter
+
+
 def _env_time():
     def getter(env: Any, env_id: int):
         for name in ("episode_length_buf", "common_step_counter"):
@@ -185,6 +203,11 @@ def _get_robot(env: Any) -> Any:
             if key in articulations:
                 return articulations[key]
     return None
+
+
+def _unwrap_env(env: Any) -> Any:
+    candidate = getattr(env, "env", env)
+    return getattr(candidate, "unwrapped", candidate)
 
 
 def _to_float_array(value: Any, env_id: int, name: str) -> np.ndarray:

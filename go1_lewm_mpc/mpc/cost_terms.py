@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from go1_lewm_mpc.common.constants import FOOT_ORDER, N_FEET
+from go1_lewm_mpc.common.types import LatentPacket
 
 
 NOMINAL_STANCE = {
@@ -32,18 +33,71 @@ def reachability_cost(candidates_b: np.ndarray, nominal_b: np.ndarray) -> np.nda
 
 def total_candidate_score(
     candidates_b: np.ndarray,
-    risk: np.ndarray,
+    risk: np.ndarray | None,
     nominal_b: np.ndarray,
+    latent_cost: np.ndarray | None = None,
     w_risk: float = 1.0,
+    w_latent: float = 1.0,
     w_reach: float = 1.0,
     w_payload: float = 0.0,
     payload_mass: float = 0.0,
 ) -> np.ndarray:
     candidates = np.asarray(candidates_b, dtype=np.float32)
-    risk_arr = np.asarray(risk, dtype=np.float32)
+    if risk is None and latent_cost is None:
+        raise ValueError("at least one of risk or latent_cost must be provided")
+    risk_arr = np.zeros(candidates.shape[0], dtype=np.float32) if risk is None else np.asarray(risk, dtype=np.float32)
     if risk_arr.shape != (candidates.shape[0],):
         raise ValueError(f"risk must have shape ({candidates.shape[0]},), got {risk_arr.shape}")
+    latent_arr = (
+        np.zeros(candidates.shape[0], dtype=np.float32)
+        if latent_cost is None
+        else np.asarray(latent_cost, dtype=np.float32)
+    )
+    if latent_arr.shape != (candidates.shape[0],):
+        raise ValueError(f"latent_cost must have shape ({candidates.shape[0]},), got {latent_arr.shape}")
+    if not np.all(np.isfinite(latent_arr)):
+        raise ValueError("latent_cost must be finite")
     reach = reachability_cost(candidates, nominal_b)
     payload_margin = float(max(payload_mass, 0.0)) * np.linalg.norm(candidates[:, 0:2], axis=1)
-    total = float(w_risk) * risk_arr + float(w_reach) * reach + float(w_payload) * payload_margin
+    total = (
+        float(w_risk) * risk_arr
+        + float(w_latent) * latent_arr
+        + float(w_reach) * reach
+        + float(w_payload) * payload_margin
+    )
     return np.asarray(total, dtype=np.float32)
+
+
+def latent_rollout_cost(
+    latent_sequence: list[LatentPacket],
+    uncertainty_weight: float = 1.0,
+    smoothness_weight: float = 0.1,
+) -> float:
+    """Scalar LeWM latent rollout cost from uncertainty and latent smoothness."""
+    if not latent_sequence:
+        raise ValueError("latent_sequence must contain at least one LatentPacket")
+    uncertainty_weight = float(uncertainty_weight)
+    smoothness_weight = float(smoothness_weight)
+    if uncertainty_weight < 0.0:
+        raise ValueError(f"uncertainty_weight must be non-negative, got {uncertainty_weight}")
+    if smoothness_weight < 0.0:
+        raise ValueError(f"smoothness_weight must be non-negative, got {smoothness_weight}")
+
+    z_values = [np.asarray(packet.z, dtype=np.float32) for packet in latent_sequence]
+    first_shape = z_values[0].shape
+    for idx, z in enumerate(z_values):
+        if z.shape != first_shape:
+            raise ValueError(f"latent z shape mismatch at index {idx}: expected {first_shape}, got {z.shape}")
+        if not np.all(np.isfinite(z)):
+            raise ValueError("latent_sequence z values must be finite")
+
+    uncertainties = np.asarray([packet.uncertainty for packet in latent_sequence], dtype=np.float32)
+    if not np.all(np.isfinite(uncertainties)):
+        raise ValueError("latent_sequence uncertainty values must be finite")
+    uncertainty_cost = float(np.mean(np.maximum(uncertainties, 0.0)))
+    if len(z_values) > 1:
+        diffs = np.stack([z_values[idx + 1] - z_values[idx] for idx in range(len(z_values) - 1)], axis=0)
+        smoothness_cost = float(np.mean(diffs**2))
+    else:
+        smoothness_cost = 0.0
+    return float(uncertainty_weight * uncertainty_cost + smoothness_weight * smoothness_cost)
