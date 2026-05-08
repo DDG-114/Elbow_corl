@@ -66,6 +66,7 @@ def make_fake_loader(created):
         "isaaclab.app": app_module,
         "isaaclab_tasks.utils": tasks_module,
         "gymnasium": gymnasium,
+        "go1_lewm_mpc.isaac_tasks": ModuleType("go1_lewm_mpc.isaac_tasks"),
     }
 
     def load(name):
@@ -110,6 +111,46 @@ def test_wrapper_reset_step_and_close_with_mock_env() -> None:
 
     assert created["env"].closed is True
     assert wrapper.env is None
+
+
+def test_wrapper_registers_project_isaac_tasks_before_parsing_env_cfg() -> None:
+    created = {}
+    calls = []
+
+    def parse_env_cfg(task_name, device, num_envs):
+        calls.append("parse_env_cfg")
+        return {"task_name": task_name, "device": device, "num_envs": num_envs, "viewer": {}}
+
+    def make(task_name, cfg):
+        env = FakeEnv()
+        created["env"] = env
+        return env
+
+    app_module = ModuleType("isaaclab.app")
+    app_module.AppLauncher = FakeAppLauncher
+    tasks_module = ModuleType("isaaclab_tasks.utils")
+    tasks_module.parse_env_cfg = parse_env_cfg
+    gymnasium = ModuleType("gymnasium")
+    gymnasium.make = make
+    project_tasks = ModuleType("go1_lewm_mpc.isaac_tasks")
+
+    modules = {
+        "isaaclab.app": app_module,
+        "isaaclab_tasks.utils": tasks_module,
+        "gymnasium": gymnasium,
+        "go1_lewm_mpc.isaac_tasks": project_tasks,
+    }
+
+    def load(name):
+        if name == "go1_lewm_mpc.isaac_tasks":
+            calls.append("register_project_tasks")
+        return modules[name]
+
+    wrapper = Go1EnvWrapper(module_loader=load)
+    wrapper.reset()
+    wrapper.close()
+
+    assert calls == ["register_project_tasks", "parse_env_cfg"]
 
 
 def test_wrapper_configures_gui_viewer_to_track_robot() -> None:

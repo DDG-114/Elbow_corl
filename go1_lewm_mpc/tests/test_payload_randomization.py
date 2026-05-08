@@ -135,6 +135,26 @@ def test_collect_dataset_exposes_payload_cli_parser() -> None:
     with pytest.raises(ValueError, match="exactly three"):
         module._parse_vec3("0.0,0.1", "--payload_com_b")
 
+    argv = [
+        "collect_dataset.py",
+        "--task",
+        "Isaac-Velocity-Rough-Unitree-Go1-v0",
+        "--reset_xy_range",
+        "1.5",
+        "--reset_yaw_range",
+        "1.2",
+        "--max_init_terrain_level",
+        "3",
+        "--headless",
+    ]
+    original = sys.argv[:]
+    try:
+        sys.argv = argv[:]
+        module._strip_collector_args_from_kit_argv()
+        assert sys.argv == ["collect_dataset.py"]
+    finally:
+        sys.argv = original
+
 
 def test_collect_dataset_can_annotate_payload_metadata(tmp_path: Path) -> None:
     module = _load_script("collect_dataset.py", "go1_collect_dataset_payload_metadata_test")
@@ -150,6 +170,75 @@ def test_collect_dataset_can_annotate_payload_metadata(tmp_path: Path) -> None:
 
     assert writer._file.attrs["payload_mass_kg"] == pytest.approx(1.75)
     assert np.allclose(writer._file.attrs["payload_com_b"], [0.01, 0.02, 0.06])
+
+
+def test_collect_dataset_env_hook_overrides_reset_pose_and_terrain_level() -> None:
+    module = _load_script("collect_dataset.py", "go1_collect_dataset_env_hook_test")
+
+    class ResetBase:
+        params = {
+            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
+            "velocity_range": {},
+        }
+
+    class Terrain:
+        max_init_terrain_level = None
+
+    class Scene:
+        terrain = Terrain()
+
+    class Events:
+        reset_base = ResetBase()
+
+    class EnvCfg:
+        scene = Scene()
+        events = Events()
+
+    args = type(
+        "Args",
+        (),
+        {
+            "reset_xy_range": 1.75,
+            "reset_yaw_range": 0.9,
+            "max_init_terrain_level": 4,
+        },
+    )()
+
+    env_cfg = EnvCfg()
+    module._make_collection_env_hook(args)(env_cfg)
+
+    pose_range = env_cfg.events.reset_base.params["pose_range"]
+    assert pose_range["x"] == (-1.75, 1.75)
+    assert pose_range["y"] == (-1.75, 1.75)
+    assert pose_range["yaw"] == (-0.9, 0.9)
+    assert env_cfg.scene.terrain.max_init_terrain_level == 4
+
+
+def test_collect_dataset_done_env_indices_supports_vectorized_masks() -> None:
+    module = _load_script("collect_dataset.py", "go1_collect_dataset_done_masks_test")
+
+    terminated = np.array([False, True, False, False], dtype=bool)
+    truncated = np.array([False, False, True, False], dtype=bool)
+
+    done = module._done_env_indices(terminated, truncated)
+
+    assert done == {1, 2}
+
+
+def test_collect_dataset_select_env_value_handles_scalar_and_vector() -> None:
+    module = _load_script("collect_dataset.py", "go1_collect_dataset_select_env_value_test")
+
+    assert module._select_env_value(0.3, 0) == pytest.approx(0.3)
+    assert module._select_env_value(np.array([0.1, 0.2, 0.3], dtype=np.float32), 2) == pytest.approx(0.3)
+    with pytest.raises(IndexError, match="env_id"):
+        module._select_env_value(np.array([0.1], dtype=np.float32), 3)
+
+
+def test_collect_dataset_main_source_initializes_completed_episodes() -> None:
+    path = REPO_ROOT / "scripts" / "collect_dataset.py"
+    text = path.read_text(encoding="utf-8")
+
+    assert "completed_episodes = 0" in text
 
 
 def _load_script(script_name: str, module_name: str):

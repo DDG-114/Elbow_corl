@@ -77,6 +77,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max_steps", type=int, default=None, help="Optional hard step cap for smoke tests.")
     parser.add_argument("--debug_dump", default="runs/closed_loop_debug.json", help="NaN/debug dump path.")
+    parser.add_argument("--lewm_debug_dump", default=None, help="Optional JSON path for per-step LEWM latent/cost summaries.")
+    parser.add_argument("--lewm_debug_print", action="store_true", help="Print per-step LEWM latent/cost summaries.")
     return parser.parse_args()
 
 
@@ -102,6 +104,8 @@ def main() -> int:
             realtime=(not args.headless if args.realtime is None else args.realtime),
             max_steps=args.max_steps,
             debug_dump=Path(args.debug_dump),
+            lewm_debug_dump=Path(args.lewm_debug_dump) if args.lewm_debug_dump else None,
+            lewm_debug_print=args.lewm_debug_print,
         )
         print(f"closed-loop summary: {metrics.summary()}", flush=True)
         return 0
@@ -138,6 +142,8 @@ def run_closed_loop(
     realtime: bool = False,
     max_steps: int | None = None,
     debug_dump: Path | None = None,
+    lewm_debug_dump: Path | None = None,
+    lewm_debug_print: bool = False,
 ) -> ClosedLoopMetrics:
     planner_mode = _validate_planner_mode(planner_mode)
     obs_adapter = ObsAdapter()
@@ -160,6 +166,7 @@ def run_closed_loop(
     )
     low_level = LowLevelPolicyWrapper(policy, use_cue=use_cue)
     metrics = ClosedLoopMetrics()
+    lewm_debug_records = []
 
     raw_obs = _first_obs(env.reset())
     steps = 0
@@ -182,8 +189,31 @@ def run_closed_loop(
             swing_leg = phase.update(obs)
             candidates_b = generator.generate(obs, swing_leg)
             wm_obs = _world_model_obs_for_mode(obs, planner_mode)
-            risk, latent_cost = _candidate_costs_for_mode(world_model, wm_obs, candidates_b, planner_mode, dt)
+            lewm_debug_step = [] if lewm_debug_dump is not None or lewm_debug_print else None
+            risk, latent_cost = _candidate_costs_for_mode(
+                world_model,
+                wm_obs,
+                candidates_b,
+                planner_mode,
+                dt,
+                lewm_debug_records=lewm_debug_step,
+            )
             plan = selector.select(obs, swing_leg, candidates_b, risk, latent_cost=latent_cost)
+            if lewm_debug_step is not None:
+                lewm_debug_records.append(
+                    _summarize_lewm_step(
+                        step=steps,
+                        t=obs.t,
+                        planner_mode=planner_mode,
+                        candidates_b=candidates_b,
+                        risk=risk,
+                        latent_cost=latent_cost,
+                        rollout_records=lewm_debug_step,
+                        selected_foothold_b=plan.selected_foothold_b,
+                    )
+                )
+                if lewm_debug_print:
+                    _log_lewm_debug(lewm_debug_records[-1])
             if use_cue:
                 cue = make_low_level_cue(obs, plan)
 
@@ -205,25 +235,42 @@ def run_closed_loop(
             if elapsed < dt:
                 time.sleep(dt - elapsed)
 
+    _write_lewm_debug_dump(lewm_debug_dump, lewm_debug_records)
     return metrics
 
 
-def _candidate_costs_for_mode(world_model, obs, candidates_b: np.ndarray, planner_mode: str, dt: float):
+def _candidate_costs_for_mode(
+    world_model,
+    obs,
+    candidates_b: np.ndarray,
+    planner_mode: str,
+    dt: float,
+    lewm_debug_records: list[dict] | None = None,
+):
     if planner_mode == "heuristic_only":
         return None, np.zeros(candidates_b.shape[0], dtype=np.float32)
     if planner_mode == "aux_risk":
         return world_model.predict_risk(obs, candidates_b), None
     if planner_mode in ("latent_cost", "latent_cost_no_payload", "latent_cost_no_heightmap"):
-        return None, _latent_cost_for_candidates(world_model, obs, candidates_b, dt)
+        return None, _latent_cost_for_candidates(world_model, obs, candidates_b, dt, lewm_debug_records)
     raise ValueError(f"unsupported planner_mode: {planner_mode}")
 
 
-def _latent_cost_for_candidates(world_model, obs, candidates_b: np.ndarray, dt: float) -> np.ndarray:
+def _latent_cost_for_candidates(
+    world_model,
+    obs,
+    candidates_b: np.ndarray,
+    dt: float,
+    lewm_debug_records: list[dict] | None = None,
+) -> np.ndarray:
     costs = []
-    for candidate in np.asarray(candidates_b, dtype=np.float32):
+    for candidate_index, candidate in enumerate(np.asarray(candidates_b, dtype=np.float32)):
         action = _candidate_mid_action_vector(obs, candidate)
         rollout = world_model.rollout_latent(obs, action[None, :], dt=dt)
-        costs.append(latent_rollout_cost(rollout))
+        cost = latent_rollout_cost(rollout)
+        costs.append(cost)
+        if lewm_debug_records is not None:
+            lewm_debug_records.append(_summarize_rollout_candidate(candidate_index, candidate, action, rollout, cost))
     return np.asarray(costs, dtype=np.float32)
 
 
@@ -300,6 +347,90 @@ def _log_record(record: dict) -> None:
         f"selected={selected_text} min_risk={record['min_risk']} bias={bias_text}",
         flush=True,
     )
+
+
+def _summarize_rollout_candidate(
+    candidate_index: int,
+    candidate_b: np.ndarray,
+    action: np.ndarray,
+    rollout: list,
+    cost: float,
+) -> dict:
+    final_latent = None if not rollout else np.asarray(rollout[-1].z, dtype=np.float32)
+    latent_norms = [float(np.linalg.norm(np.asarray(packet.z, dtype=np.float32))) for packet in rollout]
+    uncertainties = [float(packet.uncertainty) for packet in rollout]
+    return {
+        "candidate_index": int(candidate_index),
+        "candidate_b": np.asarray(candidate_b, dtype=np.float32).round(6).tolist(),
+        "action": np.asarray(action, dtype=np.float32).round(6).tolist(),
+        "rollout_len": int(len(rollout)),
+        "cost": float(cost),
+        "latent_norms": latent_norms,
+        "uncertainties": uncertainties,
+        "final_latent_head": None if final_latent is None else final_latent[: min(6, final_latent.shape[0])].round(6).tolist(),
+    }
+
+
+def _summarize_lewm_step(
+    step: int,
+    t: float,
+    planner_mode: str,
+    candidates_b: np.ndarray,
+    risk: np.ndarray | None,
+    latent_cost: np.ndarray | None,
+    rollout_records: list[dict],
+    selected_foothold_b: np.ndarray,
+) -> dict:
+    costs = None if latent_cost is None else np.asarray(latent_cost, dtype=np.float32)
+    risks = None if risk is None else np.asarray(risk, dtype=np.float32)
+    selected = np.asarray(selected_foothold_b, dtype=np.float32)
+    return {
+        "step": int(step),
+        "t": float(t),
+        "planner_mode": str(planner_mode),
+        "num_candidates": int(np.asarray(candidates_b).shape[0]),
+        "selected_foothold_b": selected.round(6).tolist(),
+        "latent_cost": _array_summary(costs),
+        "risk": _array_summary(risks),
+        "rollouts": rollout_records,
+    }
+
+
+def _array_summary(values: np.ndarray | None) -> dict | None:
+    if values is None:
+        return None
+    arr = np.asarray(values, dtype=np.float32).reshape(-1)
+    if arr.size == 0:
+        return {"count": 0, "values": []}
+    return {
+        "count": int(arr.size),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "mean": float(np.mean(arr)),
+        "argmin": int(np.argmin(arr)),
+        "values": arr.round(6).tolist(),
+    }
+
+
+def _log_lewm_debug(record: dict) -> None:
+    cost = record["latent_cost"]
+    risk = record["risk"]
+    print(
+        "lewm_debug "
+        f"step={record['step']} mode={record['planner_mode']} candidates={record['num_candidates']} "
+        f"selected={record['selected_foothold_b']} "
+        f"latent_cost_min={None if cost is None else cost.get('min')} "
+        f"latent_cost_argmin={None if cost is None else cost.get('argmin')} "
+        f"risk_min={None if risk is None else risk.get('min')}",
+        flush=True,
+    )
+
+
+def _write_lewm_debug_dump(path: Path | None, records: list[dict]) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"records": records}, indent=2), encoding="utf-8")
 
 
 def _write_debug_dump(path: Path | None, metrics: ClosedLoopMetrics) -> None:

@@ -10,8 +10,10 @@ import numpy as np
 
 from go1_lewm_mpc.common.types import LatentPacket, ObsPacket, WorldModelInputFrame
 from go1_lewm_mpc.world_model.base import WorldModelBase
+from go1_lewm_mpc.world_model.input_frame import obs_to_heightmap_frame
 from go1_lewm_mpc.world_model.state_head import constant_velocity_state_prediction
 from go1_lewm_mpc.world_model.terrain_head import terrain_features
+from go1_lewm_mpc.world_model.torch_lewm import build_torch_lewm_model
 
 
 OBS_FEATURE_DIM = 12
@@ -50,6 +52,14 @@ class LEWMAdapter(WorldModelBase):
         self.latent_dim = int(self.cfg.get("latent_dim", _checkpoint_get(checkpoint, "latent_dim", 16)))
         if self.latent_dim <= 0:
             raise ValueError(f"latent_dim must be positive, got {self.latent_dim}")
+        self.action_dim = int(self.cfg.get("action_dim", _checkpoint_get(checkpoint, "action_dim", 13)))
+        self.frame_shape = tuple(
+            int(dim)
+            for dim in self.cfg.get("frame_shape", _checkpoint_get(checkpoint, "frame_shape", (1, 64, 64)))
+        )
+        if len(self.frame_shape) != 3 or any(dim <= 0 for dim in self.frame_shape):
+            raise ValueError(f"frame_shape must be [C, H, W] with positive dims, got {self.frame_shape}")
+        self.torch_model = self._build_learned_model(checkpoint)
 
         self.encoder_weight = _optional_vector_or_matrix(
             checkpoint,
@@ -85,14 +95,14 @@ class LEWMAdapter(WorldModelBase):
         )
 
     def encode_frame(self, frame: WorldModelInputFrame) -> LatentPacket:
-        """Encode a LeWM-style frame with a deterministic local placeholder.
-
-        This is not a true upstream le-wm encoder bridge. Real upstream loading
-        is intentionally deferred to a later task.
-        """
-        frame_feat = _frame_features(frame)
-        z = np.zeros(self.latent_dim, dtype=np.float32)
-        z[: min(z.shape[0], frame_feat.shape[0])] = frame_feat[: z.shape[0]]
+        """Encode a LeWM-style frame into a latent packet."""
+        if self.torch_model is not None:
+            z = self._encode_frame_learned(frame)
+            frame_feat = _frame_features(frame)
+        else:
+            frame_feat = _frame_features(frame)
+            z = np.zeros(self.latent_dim, dtype=np.float32)
+            z[: min(z.shape[0], frame_feat.shape[0])] = frame_feat[: z.shape[0]]
         dyn_feat = np.zeros(8, dtype=np.float32)
         action = np.asarray(frame.action_context, dtype=np.float32).reshape(-1)
         dyn_feat[: min(3, action.shape[0])] = action[:3]
@@ -106,17 +116,16 @@ class LEWMAdapter(WorldModelBase):
         )
 
     def predict_next_latent(self, latent: LatentPacket, action: np.ndarray) -> LatentPacket:
-        """Predict next latent with a deterministic placeholder transition.
-
-        This keeps the semantic interface usable for tests without claiming
-        compatibility with upstream le-wm checkpoints.
-        """
+        """Predict next latent from the current latent and one high-level action."""
         action_vec = _validate_action_vector(action)
-        z = np.asarray(latent.z, dtype=np.float32).copy()
-        update_dim = min(z.shape[0], action_vec.shape[0])
-        z[:update_dim] = z[:update_dim] + 0.05 * action_vec[:update_dim]
-        if z.shape[0] > update_dim:
-            z[update_dim:] = 0.98 * z[update_dim:]
+        if self.torch_model is not None:
+            z = self._predict_next_learned(latent.z, action_vec)
+        else:
+            z = np.asarray(latent.z, dtype=np.float32).copy()
+            update_dim = min(z.shape[0], action_vec.shape[0])
+            z[:update_dim] = z[:update_dim] + 0.05 * action_vec[:update_dim]
+            if z.shape[0] > update_dim:
+                z[update_dim:] = 0.98 * z[update_dim:]
 
         dyn_feat = np.asarray(latent.dyn_feat, dtype=np.float32).copy()
         dyn_update_dim = min(dyn_feat.shape[0], action_vec.shape[0])
@@ -137,7 +146,7 @@ class LEWMAdapter(WorldModelBase):
             raise ValueError(f"dt must be positive, got {dt}")
         actions = _validate_action_sequence(action_sequence)
 
-        current = self.encode(obs)
+        current = self._encode_obs_learned(obs) if self.torch_model is not None else self.encode(obs)
         rollout: list[LatentPacket] = []
         for step_idx, action in enumerate(actions):
             current = self.predict_next_latent(current, action)
@@ -276,6 +285,44 @@ class LEWMAdapter(WorldModelBase):
         if not learned_terms:
             return None
         return np.sum(np.stack(learned_terms, axis=0), axis=0, dtype=np.float32)
+
+    def _build_learned_model(self, checkpoint: Any):
+        state_dict = _checkpoint_get(checkpoint, "model_state_dict", None)
+        if state_dict is None:
+            return None
+        model = build_torch_lewm_model(
+            self._torch,
+            frame_shape=self.frame_shape,
+            action_dim=self.action_dim,
+            latent_dim=self.latent_dim,
+            hidden_dim=int(_checkpoint_get(checkpoint, "hidden_dim", self.cfg.get("hidden_dim", 64))),
+        ).to(self.device)
+        model.load_state_dict(state_dict)
+        model.eval()
+        return model
+
+    def _encode_frame_learned(self, frame: WorldModelInputFrame) -> np.ndarray:
+        data = np.asarray(frame.frame, dtype=np.float32)
+        if data.shape != self.frame_shape:
+            raise ValueError(f"frame must have shape {self.frame_shape}, got {data.shape}")
+        with self._torch.no_grad():
+            tensor = self._torch.as_tensor(data[None, ...], dtype=self._torch.float32, device=self.device)
+            z = self.torch_model.encode(tensor).detach().cpu().numpy()[0]
+        return np.asarray(z, dtype=np.float32)
+
+    def _encode_obs_learned(self, obs: ObsPacket) -> LatentPacket:
+        frame = obs_to_heightmap_frame(obs, size=self.frame_shape[1:])
+        return self.encode_frame(frame)
+
+    def _predict_next_learned(self, z: np.ndarray, action: np.ndarray) -> np.ndarray:
+        action_vec = np.asarray(action, dtype=np.float32)
+        if action_vec.shape != (self.action_dim,):
+            raise ValueError(f"action must have shape [{self.action_dim}], got {action_vec.shape}")
+        with self._torch.no_grad():
+            z_tensor = self._torch.as_tensor(np.asarray(z, dtype=np.float32)[None, :], device=self.device)
+            action_tensor = self._torch.as_tensor(action_vec[None, :], device=self.device)
+            pred = self.torch_model.predict_next(z_tensor, action_tensor).detach().cpu().numpy()[0]
+        return np.asarray(pred, dtype=np.float32)
 
 
 def _observation_features(obs: ObsPacket) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

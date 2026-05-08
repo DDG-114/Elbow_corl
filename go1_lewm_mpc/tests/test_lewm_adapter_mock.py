@@ -1,13 +1,21 @@
 import subprocess
 import sys
+from pathlib import Path
 
+import h5py
 import numpy as np
 import pytest
 
+from go1_lewm_mpc.data.dataset_schema import WORLD_MODEL_GROUP
+from go1_lewm_mpc.data.hdf5_writer import Hdf5EpisodeWriter
+from go1_lewm_mpc.data.lewm_converter import RolloutToLeWMConfig, convert_rollout_file_to_lewm
 from go1_lewm_mpc.common.types import LatentPacket
-from go1_lewm_mpc.tests.fixtures import make_fake_candidates, make_fake_obs_packet
+from go1_lewm_mpc.tests.fixtures import make_fake_candidates, make_fake_height_scan, make_fake_obs_packet
 from go1_lewm_mpc.world_model.base import WorldModelBase
+from go1_lewm_mpc.world_model.action_adapter import MID_ACTION_VECTOR_DIM
+from go1_lewm_mpc.world_model.input_frame import obs_to_heightmap_frame
 from go1_lewm_mpc.world_model.lewm_adapter import LEWMAdapter, RISK_FEATURE_DIM
+from go1_lewm_mpc.world_model.torch_lewm import build_torch_lewm_model
 
 
 def test_missing_checkpoint_has_clear_error(tmp_path) -> None:
@@ -116,3 +124,105 @@ def test_train_lewm_help_runs() -> None:
 
     assert result.returncode == 0
     assert "--config" in result.stdout
+
+
+def test_local_torch_checkpoint_encode_frame_predict_and_rollout(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    frame_shape = (1, 8, 8)
+    latent_dim = 6
+    hidden_dim = 12
+    checkpoint = tmp_path / "local_torch.ckpt"
+    model = build_torch_lewm_model(
+        torch,
+        frame_shape=frame_shape,
+        action_dim=MID_ACTION_VECTOR_DIM,
+        latent_dim=latent_dim,
+        hidden_dim=hidden_dim,
+    )
+    torch.save(
+        {
+            "format": "go1_lewm_mpc.local_torch_lewm.v0",
+            "model_state_dict": model.state_dict(),
+            "frame_shape": frame_shape,
+            "action_dim": MID_ACTION_VECTOR_DIM,
+            "latent_dim": latent_dim,
+            "hidden_dim": hidden_dim,
+        },
+        checkpoint,
+    )
+    obs = make_fake_obs_packet(height_scan=make_fake_height_scan(rough=True))
+    adapter = LEWMAdapter(str(checkpoint), cfg={}, device="cpu")
+
+    frame_latent = adapter.encode_frame(obs_to_heightmap_frame(obs, size=frame_shape[1:]))
+    rollout = adapter.rollout_latent(
+        obs,
+        np.zeros((2, MID_ACTION_VECTOR_DIM), dtype=np.float32),
+        dt=0.02,
+    )
+
+    assert frame_latent.z.shape == (latent_dim,)
+    assert np.isfinite(frame_latent.z).all()
+    assert len(rollout) == 2
+    assert all(item.z.shape == (latent_dim,) for item in rollout)
+    assert all(np.isfinite(item.z).all() for item in rollout)
+
+
+def test_train_lewm_smoke_writes_loadable_checkpoint(tmp_path: Path) -> None:
+    pytest.importorskip("torch")
+    raw_path = tmp_path / "raw.hdf5"
+    dataset_path = tmp_path / "lewm.hdf5"
+    checkpoint_path = tmp_path / "smoke.ckpt"
+    with Hdf5EpisodeWriter(raw_path, mode="w") as writer:
+        writer.write_episode(
+            [
+                make_fake_obs_packet(
+                    t=0.02 * index,
+                    cmd_vel=np.array([0.2, 0.0, 0.1], dtype=np.float32),
+                    height_scan=make_fake_height_scan(rough=index % 2 == 0),
+                    payload_mass=0.0,
+                )
+                for index in range(9)
+            ],
+            success=True,
+            fall=False,
+        )
+
+    convert_rollout_file_to_lewm(
+        raw_path,
+        dataset_path,
+        RolloutToLeWMConfig(frame_size=(8, 8), only_success=True, require_full_length=False),
+    )
+    with h5py.File(dataset_path, "r") as file:
+        assert file["episode_000000"][WORLD_MODEL_GROUP]["frame"].shape == (9, 1, 8, 8)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/train_lewm.py",
+            "--config",
+            "configs/lewm/train_lewm.yaml",
+            "--dataset",
+            str(dataset_path),
+            "--out",
+            str(checkpoint_path),
+            "--epochs",
+            "1",
+            "--batch_size",
+            "2",
+            "--limit_batches",
+            "1",
+            "--device",
+            "cpu",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert checkpoint_path.exists()
+    adapter = LEWMAdapter(str(checkpoint_path), cfg={"frame_shape": (1, 8, 8)}, device="cpu")
+    obs = make_fake_obs_packet(height_scan=make_fake_height_scan(rough=True))
+    rollout = adapter.rollout_latent(obs, np.zeros((1, MID_ACTION_VECTOR_DIM), dtype=np.float32), dt=0.02)
+    assert len(rollout) == 1
+    assert rollout[0].z.shape == (16,)

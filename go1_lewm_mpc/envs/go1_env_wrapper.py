@@ -46,6 +46,7 @@ class Go1EnvWrapper:
         track_robot_camera: bool | None = None,
         viewer_eye: tuple[float, float, float] = DEFAULT_TRACKED_VIEWER_EYE,
         viewer_lookat: tuple[float, float, float] = DEFAULT_TRACKED_VIEWER_LOOKAT,
+        env_cfg_hook: Callable[[Any], None] | None = None,
         module_loader: Callable[[str], ModuleType] | None = None,
     ):
         self.task_name = task_name
@@ -54,6 +55,7 @@ class Go1EnvWrapper:
         self.track_robot_camera = (not self.headless) if track_robot_camera is None else bool(track_robot_camera)
         self.viewer_eye = _as_vec3(viewer_eye, "viewer_eye")
         self.viewer_lookat = _as_vec3(viewer_lookat, "viewer_lookat")
+        self.env_cfg_hook = env_cfg_hook
         self._module_loader = module_loader or importlib.import_module
         self._app_launcher = None
         self._simulation_app = None
@@ -68,11 +70,18 @@ class Go1EnvWrapper:
         """Return the underlying Isaac Lab/Gymnasium environment, if started."""
         return self._env
 
-    def reset(self) -> Any:
-        """Create the Isaac Lab environment if needed and reset it."""
+    def reset(self, env_ids: Any = None) -> Any:
+        """Create the Isaac Lab environment if needed and reset it.
+
+        If ``env_ids`` is provided and the underlying environment supports
+        partial resets, only those sub-environments are reset.
+        """
         env = self._ensure_env()
         try:
-            reset_out = env.reset()
+            if env_ids is None:
+                reset_out = env.reset()
+            else:
+                reset_out = env.reset(env_ids=env_ids)
         except BaseException as exc:  # pragma: no cover - exercised only with simulator.
             _raise_if_user_interrupt(exc)
             raise IsaacLabUnavailableError(
@@ -141,6 +150,8 @@ class Go1EnvWrapper:
                 device="cuda:0",
                 num_envs=self.num_envs,
             )
+            if self.env_cfg_hook is not None:
+                self.env_cfg_hook(env_cfg)
             self._configure_viewer(env_cfg)
             self._env = modules.gymnasium.make(self.task_name, cfg=env_cfg)
         except BaseException as exc:
@@ -224,6 +235,7 @@ class Go1EnvWrapper:
         try:
             tasks_module = self._import_first("isaaclab_tasks.utils", "omni.isaac.lab_tasks.utils")
             gymnasium = self._module_loader("gymnasium")
+            self._register_project_isaac_tasks()
         except BaseException as exc:
             _raise_if_user_interrupt(exc)
             raise IsaacLabUnavailableError(
@@ -245,6 +257,10 @@ class Go1EnvWrapper:
             parse_env_cfg=parse_env_cfg,
             gymnasium=gymnasium,
         )
+
+    def _register_project_isaac_tasks(self) -> None:
+        """Import project-local Isaac Lab task registrations after Isaac Lab is available."""
+        self._module_loader("go1_lewm_mpc.isaac_tasks")
 
     def _import_first(self, *module_names: str) -> ModuleType:
         errors: list[BaseException] = []

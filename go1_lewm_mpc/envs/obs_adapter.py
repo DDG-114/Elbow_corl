@@ -12,6 +12,11 @@ from go1_lewm_mpc.common.constants import FOOT_ORDER, N_FEET, N_JOINTS
 from go1_lewm_mpc.common.types import ObsPacket
 
 
+GO1_ROUGH_POLICY_CMD_SLICE = slice(9, 12)
+GO1_ROUGH_POLICY_LAST_ACTION_SLICE = slice(36, 48)
+GO1_ROUGH_POLICY_HEIGHT_SCAN_START = 48
+
+
 class ObsAdapter:
     """Convert raw Isaac Lab observations and scene tensors into ObsPacket.
 
@@ -54,7 +59,7 @@ class ObsAdapter:
         )
         joint_pos = self._get_required(source, env, env_id, "joint_pos", _robot_data_attr("joint_pos"))
         joint_vel = self._get_required(source, env, env_id, "joint_vel", _robot_data_attr("joint_vel"))
-        cmd_vel = self._get_required(source, env, env_id, "cmd_vel", _command_attr("command"))
+        cmd_vel = self._get_required(source, env, env_id, "cmd_vel", _first_available(_command_attr("command"), _policy_obs_cmd))
 
         foot_pos_b = self._get_optional(source, env, env_id, "foot_pos_b", None)
         if foot_pos_b is None:
@@ -71,8 +76,20 @@ class ObsAdapter:
             warnings.warn("foot_contact missing; using zeros with shape (4,)", RuntimeWarning, stacklevel=2)
             foot_contact = np.zeros(N_FEET, dtype=bool)
 
-        height_scan = self._get_optional(source, env, env_id, "height_scan", _obs_term("height_scan"))
-        last_action = self._get_optional(source, env, env_id, "last_action", _obs_term("last_action"))
+        height_scan = self._get_optional(
+            source,
+            env,
+            env_id,
+            "height_scan",
+            _first_available(_obs_term("height_scan"), _policy_obs_height_scan),
+        )
+        last_action = self._get_optional(
+            source,
+            env,
+            env_id,
+            "last_action",
+            _first_available(_obs_term("last_action"), _policy_obs_last_action),
+        )
         payload_mass = _payload_metadata_attr("payload_mass")(env, env_id)
         if payload_mass is None and "payload_mass" in source:
             payload_mass = source["payload_mass"]
@@ -115,12 +132,26 @@ class ObsAdapter:
         if name in source:
             return source[name]
         if callable(fallback):
-            return fallback(env, env_id)
+            return fallback(env, env_id, source=source)
         return fallback
 
 
+def _first_available(*getters):
+    def getter(env: Any, env_id: int, source: Mapping[str, Any] | None = None):
+        for candidate in getters:
+            try:
+                value = candidate(env, env_id, source=source)
+            except TypeError:
+                value = candidate(env, env_id)
+            if value is not None:
+                return value
+        return None
+
+    return getter
+
+
 def _robot_data_attr(attr_name: str):
-    def getter(env: Any, env_id: int):
+    def getter(env: Any, env_id: int, source: Mapping[str, Any] | None = None):
         robot = _get_robot(env)
         data = getattr(robot, "data", None)
         if data is None or not hasattr(data, attr_name):
@@ -131,7 +162,7 @@ def _robot_data_attr(attr_name: str):
 
 
 def _command_attr(attr_name: str):
-    def getter(env: Any, env_id: int):
+    def getter(env: Any, env_id: int, source: Mapping[str, Any] | None = None):
         command_manager = getattr(env, "command_manager", None)
         if command_manager is None:
             return None
@@ -148,7 +179,7 @@ def _command_attr(attr_name: str):
 
 
 def _obs_term(term_name: str):
-    def getter(env: Any, env_id: int):
+    def getter(env: Any, env_id: int, source: Mapping[str, Any] | None = None):
         observation_manager = getattr(env, "observation_manager", None)
         if observation_manager is None:
             return None
@@ -164,8 +195,46 @@ def _obs_term(term_name: str):
     return getter
 
 
+def _policy_obs_cmd(env: Any, env_id: int, source: Mapping[str, Any] | None = None):
+    policy_obs = _policy_obs_array(source, env_id)
+    if policy_obs is None:
+        return None
+    if policy_obs.shape[-1] < GO1_ROUGH_POLICY_CMD_SLICE.stop:
+        return None
+    return policy_obs[GO1_ROUGH_POLICY_CMD_SLICE]
+
+
+def _policy_obs_last_action(env: Any, env_id: int, source: Mapping[str, Any] | None = None):
+    policy_obs = _policy_obs_array(source, env_id)
+    if policy_obs is None:
+        return None
+    if policy_obs.shape[-1] < GO1_ROUGH_POLICY_LAST_ACTION_SLICE.stop:
+        return None
+    return policy_obs[GO1_ROUGH_POLICY_LAST_ACTION_SLICE]
+
+
+def _policy_obs_height_scan(env: Any, env_id: int, source: Mapping[str, Any] | None = None):
+    policy_obs = _policy_obs_array(source, env_id)
+    if policy_obs is None:
+        return None
+    if policy_obs.shape[-1] <= GO1_ROUGH_POLICY_HEIGHT_SCAN_START:
+        return None
+    return policy_obs[GO1_ROUGH_POLICY_HEIGHT_SCAN_START:]
+
+
+def _policy_obs_array(source: Mapping[str, Any] | None, env_id: int) -> np.ndarray | None:
+    if not isinstance(source, Mapping) or "policy" not in source:
+        return None
+    array = _to_float_array(source["policy"], env_id, "policy")
+    if array.ndim == 1:
+        return array
+    if array.ndim == 2 and array.shape[0] > env_id:
+        return np.asarray(array[env_id], dtype=np.float32)
+    return None
+
+
 def _payload_metadata_attr(attr_name: str):
-    def getter(env: Any, env_id: int):
+    def getter(env: Any, env_id: int, source: Mapping[str, Any] | None = None):
         target = _unwrap_env(env)
         for container_name in ("payload_metadata", "metadata"):
             container = getattr(target, container_name, None)
@@ -179,7 +248,7 @@ def _payload_metadata_attr(attr_name: str):
 
 
 def _env_time():
-    def getter(env: Any, env_id: int):
+    def getter(env: Any, env_id: int, source: Mapping[str, Any] | None = None):
         for name in ("episode_length_buf", "common_step_counter"):
             if hasattr(env, name):
                 return getattr(env, name)

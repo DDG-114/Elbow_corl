@@ -94,3 +94,33 @@ def test_obs_adapter_can_select_env_id_from_batched_raw_obs() -> None:
 
     assert packet.base_pos_w[0] == pytest.approx(raw_obs["base_pos_w"][0] + 1.0)
     assert packet.joint_pos.shape == (12,)
+
+
+def test_obs_adapter_extracts_go1_rough_height_scan_from_concatenated_policy_obs() -> None:
+    adapter = ObsAdapter()
+    raw_obs = make_fake_raw_obs(include_height_scan=False)
+    raw_obs.pop("cmd_vel")
+    raw_obs.pop("last_action")
+    height_scan = np.linspace(-0.2, 0.2, 187, dtype=np.float32)
+    last_action = np.linspace(-0.5, 0.5, 12, dtype=np.float32)
+    cmd_vel = np.array([0.4, -0.1, 0.2], dtype=np.float32)
+    policy = np.concatenate(
+        [
+            np.zeros(3, dtype=np.float32),  # base_lin_vel
+            np.zeros(3, dtype=np.float32),  # base_ang_vel
+            np.array([0.0, 0.0, -1.0], dtype=np.float32),  # projected_gravity
+            cmd_vel,
+            np.zeros(12, dtype=np.float32),  # joint_pos
+            np.zeros(12, dtype=np.float32),  # joint_vel
+            last_action,
+            height_scan,
+        ]
+    )
+    raw_obs["policy"] = policy
+
+    packet = adapter.from_isaac(raw_obs, env=None)
+
+    assert np.allclose(packet.cmd_vel, cmd_vel)
+    assert np.allclose(packet.last_action, last_action)
+    assert packet.height_scan.shape == (187,)
+    assert np.allclose(packet.height_scan, height_scan)

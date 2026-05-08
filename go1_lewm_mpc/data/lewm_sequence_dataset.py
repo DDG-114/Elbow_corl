@@ -28,6 +28,7 @@ class LeWMSequenceDataset:
         if self.seq_len <= 0:
             raise ValueError(f"seq_len must be positive, got {self.seq_len}")
         self.frame_key = str(frame_key)
+        self._file: h5py.File | None = None
         self._indices = self._build_index()
 
     def __len__(self) -> int:
@@ -41,23 +42,23 @@ class LeWMSequenceDataset:
 
         episode_name, start = self._indices[index]
         stop = start + self.seq_len
-        with h5py.File(self.hdf5_path, "r") as file:
-            world_model = file[episode_name][WORLD_MODEL_GROUP]
-            sample = {
-                "frame": world_model["frame"][start:stop].astype(np.float32),
-                "action": world_model["action"][start:stop].astype(np.float32),
-                "next_frame": world_model["next_frame"][start:stop].astype(np.float32),
-                "done": world_model["done"][start:stop].astype(np.bool_),
-                "probe": {},
-                "episode": episode_name,
-                "start": start,
+        file = self._get_file()
+        world_model = file[episode_name][WORLD_MODEL_GROUP]
+        sample = {
+            "frame": world_model["frame"][start:stop].astype(np.float32, copy=False),
+            "action": world_model["action"][start:stop].astype(np.float32, copy=False),
+            "next_frame": world_model["next_frame"][start:stop].astype(np.float32, copy=False),
+            "done": world_model["done"][start:stop].astype(np.bool_, copy=False),
+            "probe": {},
+            "episode": episode_name,
+            "start": start,
+        }
+        if WORLD_MODEL_PROBE_GROUP in world_model:
+            probe_group = world_model[WORLD_MODEL_PROBE_GROUP]
+            sample["probe"] = {
+                name: probe_group[name][start:stop]
+                for name in sorted(probe_group.keys())
             }
-            if WORLD_MODEL_PROBE_GROUP in world_model:
-                probe_group = world_model[WORLD_MODEL_PROBE_GROUP]
-                sample["probe"] = {
-                    name: probe_group[name][start:stop]
-                    for name in sorted(probe_group.keys())
-                }
         return sample
 
     def episode_names(self) -> list[str]:
@@ -81,15 +82,31 @@ class LeWMSequenceDataset:
                 episode_group = file[episode_name]
                 if WORLD_MODEL_GROUP not in episode_group:
                     continue
-                world_model = _read_world_model_group(episode_group[WORLD_MODEL_GROUP])
-                validate_world_model_episode(world_model)
-                frame = world_model["frame"]
+                world_model_group = episode_group[WORLD_MODEL_GROUP]
+                _validate_world_model_group(world_model_group)
+                frame = world_model_group["frame"]
                 if self.frame_key != "world_model/frame":
                     _validate_frame_key(self.frame_key)
                 sequence_count = frame.shape[0] - self.seq_len + 1
                 for start in range(max(0, sequence_count)):
                     indices.append((episode_name, start))
         return indices
+
+    def _get_file(self) -> h5py.File:
+        file = self._file
+        if file is None:
+            file = h5py.File(self.hdf5_path, "r")
+            self._file = file
+        return file
+
+    def close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+    def __del__(self):
+        if hasattr(self, "_file"):
+            self.close()
 
 
 def _read_world_model_group(group: h5py.Group) -> dict[str, Any]:
@@ -108,3 +125,28 @@ def _validate_frame_key(frame_key: str) -> None:
             "Only frame_key='world_model/frame' is supported in the PR-07 schema view. "
             f"Got {frame_key!r}."
         )
+
+
+def _validate_world_model_group(group: h5py.Group) -> None:
+    if not all(field in group for field in ("frame", "action", "next_frame", "done")):
+        world_model = _read_world_model_group(group)
+        validate_world_model_episode(world_model)
+        return
+
+    frame = group["frame"]
+    action = group["action"]
+    next_frame = group["next_frame"]
+    done = group["done"]
+
+    if frame.ndim != 4:
+        raise ValueError(f"world_model/frame must have shape [T, C, H, W], got {frame.shape}")
+    if action.ndim != 2:
+        raise ValueError(f"world_model/action must have shape [T, A], got {action.shape}")
+    if next_frame.shape != frame.shape:
+        raise ValueError(f"world_model/next_frame must match frame shape {frame.shape}, got {next_frame.shape}")
+    if done.shape != (frame.shape[0],):
+        raise ValueError(f"world_model/done must have shape [{frame.shape[0]}], got {done.shape}")
+    if action.shape[0] != frame.shape[0]:
+        raise ValueError(f"world_model/action first dimension must be T={frame.shape[0]}, got {action.shape[0]}")
+    if frame.shape[0] == 0:
+        raise ValueError("world_model episode must contain at least one timestep")
