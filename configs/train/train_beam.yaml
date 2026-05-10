@@ -1,0 +1,11 @@
+terrain:
+  type: beam
+  width_range: [0.18, 0.50]
+policy:
+  observation_mode: terrain_conditioned
+algorithm: PPO
+curriculum:
+  - width: 0.50
+  - width: 0.35
+  - width: 0.25
+  - width: 0.18

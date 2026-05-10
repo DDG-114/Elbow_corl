@@ -1,0 +1,8 @@
+type: stepping_stones
+radius_range: [0.10, 0.22]
+spacing_range: [0.30, 0.60]
+height_range: [0.00, 0.20]
+n_stones_range: [8, 20]
+lateral_jitter: 0.12
+map_size: [64, 64]
+resolution: 0.05

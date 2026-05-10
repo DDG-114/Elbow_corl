@@ -1,0 +1,8 @@
+type: beam
+width_range: [0.18, 0.50]
+length_range: [3.0, 8.0]
+height_range: [0.05, 0.30]
+heading_range: [0.0, 0.0]
+edge_margin: 0.03
+map_size: [64, 64]
+resolution: 0.05

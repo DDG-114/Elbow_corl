@@ -1,0 +1,13 @@
+scenarios:
+  - name: mixed_flat_beam_stones
+    terrain:
+      type: mixed
+      probabilities: [0.4, 0.3, 0.3]
+    episodes: 30
+metrics:
+  - success_rate
+  - fall_rate
+  - foot_outside_support_rate
+  - mean_centerline_error
+  - foot_in_gap_count
+  - traveled_distance

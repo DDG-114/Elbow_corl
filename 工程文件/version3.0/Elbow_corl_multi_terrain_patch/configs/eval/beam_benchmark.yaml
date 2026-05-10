@@ -1,0 +1,29 @@
+scenarios:
+  - name: beam_width_0_50
+    terrain:
+      type: beam
+      width_range: [0.50, 0.50]
+    episodes: 20
+  - name: beam_width_0_35
+    terrain:
+      type: beam
+      width_range: [0.35, 0.35]
+    episodes: 20
+  - name: beam_width_0_25
+    terrain:
+      type: beam
+      width_range: [0.25, 0.25]
+    episodes: 20
+  - name: beam_width_0_18
+    terrain:
+      type: beam
+      width_range: [0.18, 0.18]
+    episodes: 20
+metrics:
+  - success_rate
+  - traveled_distance
+  - fall_rate
+  - foot_outside_support_rate
+  - mean_centerline_error
+  - min_edge_margin
+  - energy_proxy

@@ -2,7 +2,8 @@
 
 This is the agentic coding task queue for the existing `Elbow_corl` repository.
 
-Use `TASKS.md` as the original project plan, but follow this file for incremental LeWM-alignment refactoring.
+This root-level queue is the active source of truth for current implementation status.
+Older Phase 1 planning material has been archived under `工程文件/`.
 
 ## Current Status Assumption
 
@@ -29,9 +30,9 @@ Therefore, do not rebuild the project from scratch.
 
 ## Legacy Phase 1 Status
 
-The original task queue in `TASKS.md` has already been implemented far enough
-for the current LeWM-alignment work. Treat the existing code as the baseline
-for incremental refactoring:
+The original Phase 1 task queue has already been implemented far enough for
+the current LeWM-alignment work. Treat the existing code as the baseline for
+incremental refactoring:
 
 ```text
 Task 001-008: DONE

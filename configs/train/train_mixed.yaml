@@ -1,0 +1,5 @@
+terrain:
+  type: mixed
+policy:
+  observation_mode: terrain_and_foothold_conditioned
+algorithm: PPO

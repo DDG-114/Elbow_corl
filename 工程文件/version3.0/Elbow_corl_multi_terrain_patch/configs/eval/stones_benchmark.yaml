@@ -1,0 +1,26 @@
+scenarios:
+  - name: stones_easy
+    terrain:
+      type: stepping_stones
+      radius_range: [0.22, 0.22]
+      spacing_range: [0.30, 0.35]
+    episodes: 20
+  - name: stones_medium
+    terrain:
+      type: stepping_stones
+      radius_range: [0.16, 0.18]
+      spacing_range: [0.40, 0.48]
+    episodes: 20
+  - name: stones_hard
+    terrain:
+      type: stepping_stones
+      radius_range: [0.10, 0.14]
+      spacing_range: [0.50, 0.60]
+    episodes: 20
+metrics:
+  - success_rate
+  - fall_rate
+  - foot_in_gap_count
+  - mean_distance_to_stone_center
+  - missed_foothold_count
+  - traveled_distance

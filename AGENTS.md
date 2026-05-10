@@ -2,6 +2,9 @@
 
 This repository is an existing Unitree Go1 + Isaac Lab + LeWM + MPC foothold-cue project. It is not a greenfield repository.
 
+Historical task packs and archived planning documents live under `工程文件/`.
+Use the root-level `AGENTS.md`, `CODEX_TASK_QUEUE.md`, and `README.md` as the current source of truth.
+
 ## Project Goal
 
 The project should align its world-model layer with the original `lucas-maes/le-wm` design:
@@ -125,16 +128,3 @@ Simulator-dependent checks should be local and optional:
 ```
 
 If Isaac Lab is unavailable, add or run mock tests instead of forcing simulator execution.
-
-## Codex Response Format
-
-Every task response must end with:
-
-```text
-Files changed:
-Tests run:
-Assumptions:
-Limitations:
-Next recommended task:
-Stop.
-```

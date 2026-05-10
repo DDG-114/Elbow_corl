@@ -1,0 +1,14 @@
+type: mixed
+probabilities: [0.4, 0.3, 0.3]
+flat:
+  map_size: [64, 64]
+  resolution: 0.05
+beam:
+  width_range: [0.18, 0.50]
+  map_size: [64, 64]
+  resolution: 0.05
+stepping_stones:
+  radius_range: [0.10, 0.22]
+  spacing_range: [0.30, 0.60]
+  map_size: [64, 64]
+  resolution: 0.05

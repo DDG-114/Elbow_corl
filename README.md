@@ -2,6 +2,14 @@
 
 For Codex: read `AGENTS.md` before making changes. This is an existing repository, not a greenfield project.
 
+Current active engineering references:
+
+- `AGENTS.md`
+- `CODEX_TASK_QUEUE.md`
+- `CODEX_PROMPTS.md`
+
+Historical planning packs and early-phase task docs are archived under `工程文件/`.
+
 Phase 1 builds a mock-testable scaffold for a Unitree Go1 foothold-cue system in Isaac Lab. The intended architecture keeps the official Go1 rough-terrain locomotion policy as the low-level controller, while a future LEWM layer predicts local terrain risk and reduced-order state features for foothold selection.
 
 ```text
@@ -107,13 +115,22 @@ pred_state = model.predict_state(obs, horizon=10, dt=0.02)
 
 The adapter raises a clear `FileNotFoundError` when the checkpoint path is missing. If `device="cuda"` is requested but CUDA is unavailable, it warns and falls back to CPU. The first checkpoint contract is intentionally small: metadata-only mock checkpoints, linear heads, and risk MLP state dicts are supported so the closed-loop code can swap in a learned model without changing the `WorldModelBase` call sites.
 
-The training entrypoint is present for config validation:
+The training entrypoint supports both dry-run validation and full local training:
 
 ```bash
 python scripts/train_lewm.py --config configs/lewm/train_lewm.yaml --dry_run
 ```
 
-Full LEWM training is deferred; running without `--dry_run` raises `NotImplementedError` instead of silently producing a placeholder checkpoint.
+Example full training:
+
+```bash
+python scripts/train_lewm.py \
+  --dataset data/go1_rough_lewm_sequences_500x500.hdf5 \
+  --out checkpoints/lewm_heightscan_rough_500x500_v1.ckpt \
+  --epochs 20 \
+  --batch_size 256 \
+  --device cuda
+```
 
 ## Foothold Candidates
 

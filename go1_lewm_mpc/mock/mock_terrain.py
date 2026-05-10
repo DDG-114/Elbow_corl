@@ -1,0 +1,15 @@
+"""Mock terrain helpers for tests and debug scripts."""
+
+from __future__ import annotations
+
+import numpy as np
+
+from go1_lewm_mpc.terrains.registry import make_terrain_generator
+
+
+def make_mock_terrain_context(terrain_type: str = "flat", seed: int = 0):
+    """Return one deterministic terrain context around the origin."""
+
+    rng = np.random.default_rng(seed)
+    generator = make_terrain_generator({"type": terrain_type})
+    return generator.query_context(np.array([0.0, 0.0, 0.28], dtype=np.float32), 0.0, rng)

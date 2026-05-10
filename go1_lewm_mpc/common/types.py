@@ -17,6 +17,7 @@ from go1_lewm_mpc.common.math_utils import (
     optional_float_array,
     validate_finite,
 )
+from go1_lewm_mpc.common.terrain_types import TerrainContext
 
 
 @dataclass
@@ -48,6 +49,7 @@ class ObsPacket:
     # Payload/domain randomization info.
     payload_mass: float = 0.0
     payload_com_b: Optional[np.ndarray] = None  # shape [3], meters, body frame
+    terrain_context: Optional[TerrainContext] = None
 
     def __post_init__(self) -> None:
         self.t = _validate_scalar(self.t, "t")
@@ -65,6 +67,8 @@ class ObsPacket:
         self.last_action = optional_float_array(self.last_action, "last_action", (N_JOINTS,))
         self.payload_mass = _validate_scalar(self.payload_mass, "payload_mass")
         self.payload_com_b = optional_float_array(self.payload_com_b, "payload_com_b", (3,))
+        if self.terrain_context is not None and not isinstance(self.terrain_context, TerrainContext):
+            raise ValueError("terrain_context must be a TerrainContext or None")
 
 
 @dataclass

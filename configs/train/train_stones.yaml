@@ -1,0 +1,7 @@
+terrain:
+  type: stepping_stones
+  radius_range: [0.10, 0.22]
+  spacing_range: [0.30, 0.60]
+policy:
+  observation_mode: foothold_conditioned
+algorithm: PPO
