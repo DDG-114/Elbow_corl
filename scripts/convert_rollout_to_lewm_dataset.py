@@ -12,6 +12,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from go1_lewm_mpc.data.lewm_converter import RolloutToLeWMConfig, convert_rollout_file_to_lewm
+from go1_lewm_mpc.data.lewm_converter import ACTION_MODES, ACTION_MODE_COMMAND
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,6 +25,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require_full_length", action="store_true", help="Keep only full-length episodes.")
     parser.add_argument("--expected_length", type=int, default=None, help="Expected full episode length.")
     parser.add_argument("--min_length", type=int, default=2, help="Minimum episode length to convert.")
+    parser.add_argument(
+        "--action_mode",
+        choices=ACTION_MODES,
+        default=ACTION_MODE_COMMAND,
+        help=(
+            "How to fill the 13D MidAction vector. 'command' uses cmd_vel only. "
+            "'touchdown' adds hindsight selected-leg and foothold-delta labels "
+            "from observed foot contact transitions."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -36,6 +47,7 @@ def main() -> int:
         require_full_length=bool(args.require_full_length),
         expected_length=args.expected_length,
         min_length=int(args.min_length),
+        action_mode=str(args.action_mode),
     )
     summary = convert_rollout_file_to_lewm(args.input_path, args.output_path, cfg)
     print("Rollout -> LeWM conversion complete:")

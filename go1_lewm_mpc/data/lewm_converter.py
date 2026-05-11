@@ -15,6 +15,10 @@ from go1_lewm_mpc.data.hdf5_writer import Hdf5EpisodeWriter
 from go1_lewm_mpc.world_model.action_adapter import mid_action_to_vector
 from go1_lewm_mpc.world_model.input_frame import obs_to_heightmap_frame
 
+ACTION_MODE_COMMAND = "command"
+ACTION_MODE_TOUCHDOWN = "touchdown"
+ACTION_MODES = (ACTION_MODE_COMMAND, ACTION_MODE_TOUCHDOWN)
+
 
 @dataclass(frozen=True)
 class RolloutToLeWMConfig:
@@ -26,6 +30,7 @@ class RolloutToLeWMConfig:
     require_full_length: bool = False
     min_length: int = 2
     expected_length: int | None = None
+    action_mode: str = ACTION_MODE_COMMAND
 
 
 @dataclass(frozen=True)
@@ -58,6 +63,8 @@ def convert_rollout_file_to_lewm(
         raise ValueError(
             f"expected_length must be >= min_length ({cfg.min_length}), got {cfg.expected_length}"
         )
+    if cfg.action_mode not in ACTION_MODES:
+        raise ValueError(f"action_mode must be one of {ACTION_MODES}, got {cfg.action_mode!r}")
 
     skipped_reasons: dict[str, int] = {}
     episodes_seen = 0
@@ -71,6 +78,7 @@ def convert_rollout_file_to_lewm(
             writer_file.attrs["source_rollout_path"] = str(input_path)
             writer_file.attrs["frame_size"] = np.asarray(cfg.frame_size, dtype=np.int32)
             writer_file.attrs["frame_normalized"] = bool(cfg.normalize_frames)
+            writer_file.attrs["action_mode"] = str(cfg.action_mode)
 
         for episode_name in sorted(name for name in src.keys() if name.startswith("episode_")):
             episodes_seen += 1
@@ -85,6 +93,7 @@ def convert_rollout_file_to_lewm(
                 episode,
                 frame_size=cfg.frame_size,
                 normalize_frames=cfg.normalize_frames,
+                action_mode=cfg.action_mode,
             )
             writer.write_episode(episode)
             episodes_written += 1
@@ -103,8 +112,12 @@ def build_world_model_episode(
     episode: dict[str, Any],
     frame_size: tuple[int, int] = (64, 64),
     normalize_frames: bool = True,
+    action_mode: str = ACTION_MODE_COMMAND,
 ) -> dict[str, Any]:
     """Build a ``world_model`` group payload from one raw rollout episode."""
+
+    if action_mode not in ACTION_MODES:
+        raise ValueError(f"action_mode must be one of {ACTION_MODES}, got {action_mode!r}")
 
     step_count = int(np.asarray(episode["t"]).shape[0])
     if step_count < 2:
@@ -124,7 +137,7 @@ def build_world_model_episode(
     ).astype(np.float32)
     next_frames = np.concatenate([frames[1:], frames[-1:]], axis=0).astype(np.float32)
     actions = np.stack(
-        [_command_only_mid_action_vector(episode, index) for index in range(step_count)],
+        [_mid_action_vector(episode, index, action_mode) for index in range(step_count)],
         axis=0,
     ).astype(np.float32)
     done = np.zeros(step_count, dtype=np.bool_)
@@ -179,6 +192,54 @@ def _command_only_mid_action_vector(episode: dict[str, Any], index: int) -> np.n
         foothold_delta_b=None,
     )
     return mid_action_to_vector(action)
+
+
+def _mid_action_vector(episode: dict[str, Any], index: int, action_mode: str) -> np.ndarray:
+    if action_mode == ACTION_MODE_COMMAND:
+        return _command_only_mid_action_vector(episode, index)
+    if action_mode == ACTION_MODE_TOUCHDOWN:
+        return _touchdown_mid_action_vector(episode, index)
+    raise ValueError(f"action_mode must be one of {ACTION_MODES}, got {action_mode!r}")
+
+
+def _touchdown_mid_action_vector(episode: dict[str, Any], index: int) -> np.ndarray:
+    selected_leg_id, foothold_delta_b = _infer_touchdown_action(episode, index)
+    action = MidAction(
+        t=float(np.asarray(episode["t"])[index]),
+        cmd_vel=np.asarray(episode["cmd_vel"], dtype=np.float32)[index],
+        velocity_bias=np.zeros(3, dtype=np.float32),
+        selected_leg_id=selected_leg_id,
+        foothold_delta_b=foothold_delta_b,
+    )
+    return mid_action_to_vector(action)
+
+
+def _infer_touchdown_action(episode: dict[str, Any], index: int) -> tuple[int | None, np.ndarray | None]:
+    """Infer a sparse foothold-conditioned action from the next contact event.
+
+    The action at timestep ``t`` conditions the model's ``frame[t] -> frame[t+1]``
+    transition. If a foot is airborne at ``t`` and becomes contacted at
+    ``t+1``, the heuristic records that leg and the body-frame displacement
+    from the current foot position to the touchdown foot position. This is a
+    hindsight label for pretraining; real MPC-plan labels should replace it
+    once the closed loop logs selected footholds.
+    """
+
+    foot_contact = np.asarray(episode["foot_contact"], dtype=np.bool_)
+    foot_pos_b = np.asarray(episode["foot_pos_b"], dtype=np.float32)
+    if index + 1 >= foot_contact.shape[0]:
+        return None, None
+
+    transitions = np.logical_and(~foot_contact[index], foot_contact[index + 1])
+    leg_ids = np.nonzero(transitions)[0]
+    if leg_ids.size == 0:
+        return None, None
+
+    deltas = foot_pos_b[index + 1, leg_ids] - foot_pos_b[index, leg_ids]
+    best = int(np.argmax(np.linalg.norm(deltas, axis=1)))
+    selected_leg_id = int(leg_ids[best])
+    foothold_delta_b = np.asarray(deltas[best], dtype=np.float32)
+    return selected_leg_id, foothold_delta_b
 
 
 def _base_state_probe(episode: dict[str, Any]) -> np.ndarray:

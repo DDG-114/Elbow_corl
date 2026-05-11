@@ -9,6 +9,8 @@ MIXED_SPARSE_GO1_TASK = "Isaac-Velocity-MixedSparse-Unitree-Go1-v0"
 MIXED_SPARSE_GO1_PLAY_TASK = "Isaac-Velocity-MixedSparse-Unitree-Go1-Play-v0"
 PLUM_PILES_GO1_TASK = "Isaac-Velocity-PlumPiles-Unitree-Go1-v0"
 PLUM_PILES_GO1_PLAY_TASK = "Isaac-Velocity-PlumPiles-Unitree-Go1-Play-v0"
+FLAT_TO_ROUGH_GO1_TASK = "Isaac-Velocity-FlatToRough-Unitree-Go1-v0"
+FLAT_TO_ROUGH_GO1_PLAY_TASK = "Isaac-Velocity-FlatToRough-Unitree-Go1-Play-v0"
 
 
 def register_go1_tasks() -> None:
@@ -39,6 +41,20 @@ def register_go1_tasks() -> None:
         env_cfg_entry_point=(
             "go1_lewm_mpc.isaac_tasks.locomotion.go1.plum_piles_env_cfg:"
             "UnitreeGo1PlumPilesEnvCfg_PLAY"
+        ),
+    )
+    _register(
+        task_id=FLAT_TO_ROUGH_GO1_TASK,
+        env_cfg_entry_point=(
+            "go1_lewm_mpc.isaac_tasks.locomotion.go1.flat_to_rough_env_cfg:"
+            "UnitreeGo1FlatToRoughEnvCfg"
+        ),
+    )
+    _register(
+        task_id=FLAT_TO_ROUGH_GO1_PLAY_TASK,
+        env_cfg_entry_point=(
+            "go1_lewm_mpc.isaac_tasks.locomotion.go1.flat_to_rough_env_cfg:"
+            "UnitreeGo1FlatToRoughEnvCfg_PLAY"
         ),
     )
 
